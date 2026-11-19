@@ -10,6 +10,7 @@ interface AuthState {
   user?: AuthUser;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
+  updateAccount: (update: { currentPassword: string; email?: string; newPassword?: string }) => Promise<void>;
   logout: () => void;
 }
 
@@ -80,6 +81,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           email,
           password,
         });
+        setApiToken(data.data.token);
+        sessionStorage.setItem(TOKEN_KEY, data.data.token);
+        sessionStorage.setItem(USER_KEY, JSON.stringify(data.data.user));
+        setUser(data.data.user);
+      },
+      updateAccount: async (update) => {
+        const { data } = await api.patch<ApiResponse<{ token: string; user: AuthUser }>>('/auth/account', update);
         setApiToken(data.data.token);
         sessionStorage.setItem(TOKEN_KEY, data.data.token);
         sessionStorage.setItem(USER_KEY, JSON.stringify(data.data.user));

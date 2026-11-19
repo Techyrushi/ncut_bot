@@ -12,6 +12,7 @@ A TypeScript monorepo for managing an abrasive-product catalogue, automating pro
 - Stateful catalogue discovery, seven-day conversation expiry, opt-out handling, unique product interest tracking, and one-time third-product prompt.
 - Human handover, sales lead creation, and configurable log/webhook notification.
 - Product, customer, conversation, lead, team, template, authentication, and dashboard APIs.
+- Self-service account email/password changes with prior-session invalidation and accessible show/hide password controls.
 - Responsive authenticated React dashboard, catalogue entry, QR click-to-chat builder, and operational views.
 - Zod request validation, JWT roles/revocation, bcrypt passwords, Helmet, CORS, rate limits, structured logs, and safe API errors.
 - Docker Compose, TypeScript checks, and Jest/Supertest tests using MongoDB Memory Server.
@@ -76,6 +77,7 @@ On startup the backend validates required configuration, connects to MongoDB, an
 | -------------------------------- | ----------: | -------------------------------------------------- |
 | `NODE_ENV`                       |          No | `development`, `test`, or `production`             |
 | `PORT`                           |          No | Backend port (default `5000`)                      |
+| `HOST`                           |          No | Backend bind address (default `0.0.0.0`)           |
 | `APP_URL`                        |          No | Public API base URL                                |
 | `MONGODB_URI`                    |         Yes | Mongo connection URI                               |
 | `WHATSAPP_ACCESS_TOKEN`          |  Production | Meta system-user access token                      |

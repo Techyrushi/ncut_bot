@@ -6,6 +6,7 @@ import { app } from '../src/app';
 import { User } from '../src/database/models/user.model';
 import { RevokedToken } from '../src/database/models/revoked-token.model';
 import { Product } from '../src/database/models/product.model';
+import { env } from '../src/config/env';
 
 let mongo: MongoMemoryServer;
 
@@ -140,11 +141,54 @@ it('authenticates, enforces protected routes, and revokes a logged-out JWT', asy
     sendConfigured: true,
     webhookConfigured: true,
     accessTokenConfigured: true,
-    webhookEndpoint: 'http://localhost:5000/api/v1/webhooks/whatsapp',
+    webhookEndpoint: new URL('/api/v1/webhooks/whatsapp', env.APP_URL).toString(),
   });
 
   const logout = await request(app).post('/api/v1/auth/logout').set('authorization', `Bearer ${token}`);
   expect(logout.status).toBe(200);
   const revoked = await request(app).get('/api/v1/dashboard/stats').set('authorization', `Bearer ${token}`);
   expect(revoked.status).toBe(401);
+});
+
+it('updates account credentials with the current password and invalidates prior sessions', async () => {
+  await User.create({
+    email: 'admin@example.com',
+    name: 'Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const login = await request(app)
+    .post('/api/v1/auth/login')
+    .send({ email: 'admin@example.com', password: 'long-test-password' });
+  const oldToken = login.body.data.token as string;
+
+  const rejected = await request(app)
+    .patch('/api/v1/auth/account')
+    .set('authorization', `Bearer ${oldToken}`)
+    .send({ currentPassword: 'wrong-password', newPassword: 'new-test-password-123' });
+  expect(rejected.status).toBe(403);
+
+  const changed = await request(app)
+    .patch('/api/v1/auth/account')
+    .set('authorization', `Bearer ${oldToken}`)
+    .send({
+      currentPassword: 'long-test-password',
+      email: 'new-admin@example.com',
+      newPassword: 'new-test-password-123',
+    });
+  expect(changed.status).toBe(200);
+  expect(changed.body.data.user.email).toBe('new-admin@example.com');
+
+  const oldSession = await request(app).get('/api/v1/auth/me').set('authorization', `Bearer ${oldToken}`);
+  expect(oldSession.status).toBe(401);
+
+  const oldCredentials = await request(app)
+    .post('/api/v1/auth/login')
+    .send({ email: 'admin@example.com', password: 'long-test-password' });
+  expect(oldCredentials.status).toBe(401);
+
+  const newCredentials = await request(app)
+    .post('/api/v1/auth/login')
+    .send({ email: 'new-admin@example.com', password: 'new-test-password-123' });
+  expect(newCredentials.status).toBe(200);
 });

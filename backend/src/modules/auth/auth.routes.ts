@@ -1,4 +1,4 @@
-import { compare } from 'bcryptjs';
+import { compare, hash } from 'bcryptjs';
 import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import jwt from 'jsonwebtoken';
@@ -18,6 +18,18 @@ const credentialsSchema = z.object({
     .transform((value) => value.toLowerCase()),
   password: z.string().min(1).max(200),
 });
+const accountUpdateSchema = z
+  .object({
+    currentPassword: z.string().min(1).max(200),
+    email: z
+      .string()
+      .email()
+      .transform((value) => value.toLowerCase())
+      .optional(),
+    newPassword: z.string().min(12).max(200).optional(),
+  })
+  .strict()
+  .refine((value) => value.email !== undefined || value.newPassword !== undefined);
 
 export const authRouter = Router();
 const loginLimiter = rateLimit({
@@ -36,7 +48,7 @@ authRouter.post(
     if (!user || !(await compare(credentials.password, user.passwordHash))) {
       throw new ApiError(401, 'Invalid email or password', 'INVALID_CREDENTIALS');
     }
-    const token = jwt.sign({ role: user.role }, env.JWT_SECRET, {
+    const token = jwt.sign({ role: user.role, ver: user.authVersion ?? 0 }, env.JWT_SECRET, {
       subject: user.id,
       jwtid: randomUUID(),
       expiresIn: env.JWT_EXPIRES_IN as jwt.SignOptions['expiresIn'],
@@ -68,6 +80,42 @@ authRouter.get(
     res.json({
       success: true,
       data: { id: String(user._id), email: user.email, name: user.name, role: user.role },
+    });
+  }),
+);
+
+authRouter.patch(
+  '/account',
+  authenticate,
+  asyncHandler(async (req, res) => {
+    const update = accountUpdateSchema.parse(req.body);
+    const { id } = (req as AuthenticatedRequest).user!;
+    const user = await User.findOne({ _id: id, isActive: true }).select('+passwordHash');
+    if (!user || !(await compare(update.currentPassword, user.passwordHash))) {
+      throw new ApiError(403, 'Current password is incorrect', 'INVALID_CURRENT_PASSWORD');
+    }
+
+    if (update.email && update.email !== user.email) {
+      const emailInUse = await User.exists({ email: update.email, _id: { $ne: user._id } });
+      if (emailInUse) throw new ApiError(409, 'Email address is already in use', 'EMAIL_IN_USE');
+      user.email = update.email;
+    }
+    if (update.newPassword) user.passwordHash = await hash(update.newPassword, 12);
+
+    user.authVersion = (user.authVersion ?? 0) + 1;
+    await user.save();
+
+    const token = jwt.sign({ role: user.role, ver: user.authVersion }, env.JWT_SECRET, {
+      subject: user.id,
+      jwtid: randomUUID(),
+      expiresIn: env.JWT_EXPIRES_IN as jwt.SignOptions['expiresIn'],
+    });
+    res.json({
+      success: true,
+      data: {
+        token,
+        user: { id: user.id, email: user.email, name: user.name, role: user.role },
+      },
     });
   }),
 );

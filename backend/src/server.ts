@@ -12,7 +12,9 @@ async function start(): Promise<void> {
   await initializeAdminUser();
   const worker = startWebhookWorker();
   worker.unref();
-  const server = app.listen(env.PORT, () => logger.info({ port: env.PORT }, 'HTTP server listening'));
+  const server = app.listen(env.PORT, env.HOST, () =>
+    logger.info({ host: env.HOST, port: env.PORT }, 'HTTP server listening'),
+  );
   registerShutdown(server, worker);
 }
 

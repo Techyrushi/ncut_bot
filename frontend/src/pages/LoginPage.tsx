@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from 'react';
 import { Navigate, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
+import { PasswordField } from '../components/PasswordField';
 
 export function LoginPage() {
   const { user, isLoading, login } = useAuth();
@@ -74,17 +75,15 @@ export function LoginPage() {
             placeholder="you@company.com"
           />
         </label>
-        <label>
-          Password
-          <input
-            autoComplete="current-password"
-            type="password"
-            required
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="Enter your password"
-          />
-        </label>
+        <PasswordField
+          id="login-password"
+          label="Password"
+          autoComplete="current-password"
+          value={password}
+          onChange={setPassword}
+          placeholder="Enter your password"
+          required
+        />
         {error && <div className="alert error">{error}</div>}
         <button className="primary-button full-width" disabled={busy}>
           {busy ? 'Signing in…' : 'Continue'} <span>→</span>

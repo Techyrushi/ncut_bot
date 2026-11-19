@@ -18,20 +18,23 @@ export function authenticate(req: Request, _res: Response, next: NextFunction): 
   }
   try {
     const claims = jwt.verify(token, env.JWT_SECRET) as jwt.JwtPayload;
+    const tokenVersion = claims.ver === undefined ? 0 : claims.ver;
     if (
       typeof claims.sub !== 'string' ||
       typeof claims.jti !== 'string' ||
       typeof claims.exp !== 'number' ||
+      typeof tokenVersion !== 'number' ||
+      !Number.isInteger(tokenVersion) ||
       (claims.role !== 'ADMIN' && claims.role !== 'SALES')
     ) {
       throw new Error('Invalid token claims');
     }
     void Promise.all([
       RevokedToken.exists({ tokenId: claims.jti }),
-      User.findOne({ _id: claims.sub, isActive: true }).select('_id role').lean(),
+      User.findOne({ _id: claims.sub, isActive: true }).select('_id role authVersion').lean(),
     ])
       .then(([revoked, user]) => {
-        if (revoked || !user) {
+        if (revoked || !user || (user.authVersion ?? 0) !== tokenVersion) {
           next(new ApiError(401, 'Invalid or expired authentication token', 'UNAUTHORIZED'));
           return;
         }

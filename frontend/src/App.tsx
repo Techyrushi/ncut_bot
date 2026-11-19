@@ -9,6 +9,7 @@ import { RecordsPage } from './pages/RecordsPage';
 import { ConversationsPage, LeadsPage, TeamPage, TemplatesPage } from './pages/OperationsPages';
 import { AutomationSettingsPage, UtilityPage, WhatsAppSetupPage } from './pages/UtilityPages';
 import { ProtectedRoute } from './components/ProtectedRoute';
+import { AccountSecurityPage } from './pages/AccountSecurityPage';
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } } });
 
@@ -33,6 +34,7 @@ export default function App() {
                 <Route path="templates" element={<TemplatesPage />} />
                 <Route path="whatsapp" element={<WhatsAppSetupPage />} />
                 <Route path="automation" element={<AutomationSettingsPage />} />
+                <Route path="account-security" element={<AccountSecurityPage />} />
                 <Route
                   path="logs"
                   element={

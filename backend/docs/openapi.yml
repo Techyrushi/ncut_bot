@@ -43,6 +43,28 @@ paths:
       summary: Return the current authenticated principal
       responses:
         '200': { description: Current user }
+  /auth/account:
+    patch:
+      summary: Change the current user's email and/or password
+      description: Requires the current password, rotates the bearer token, and invalidates existing sessions.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword]
+              anyOf:
+                - required: [email]
+                - required: [newPassword]
+              properties:
+                currentPassword: { type: string, minLength: 1 }
+                email: { type: string, format: email }
+                newPassword: { type: string, minLength: 12, maxLength: 200 }
+      responses:
+        '200': { description: Updated identity and replacement bearer token }
+        '403': { description: Current password is incorrect }
+        '409': { description: Email address is already in use }
   /products:
     get:
       summary: List products

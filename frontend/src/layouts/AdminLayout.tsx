@@ -14,6 +14,7 @@ const navItems = [
   ['/templates', 'Message templates'],
   ['/whatsapp', 'WhatsApp setup'],
   ['/automation', 'Automation'],
+  ['/account-security', 'Account security'],
   ['/logs', 'System logs'],
 ];
 

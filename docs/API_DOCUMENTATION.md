@@ -12,6 +12,7 @@ Login obtains a bearer token. Supply it as `Authorization: Bearer <token>` on pr
 | POST      | `/auth/login`                                            | No                  | `{email,password}`                                                                     |
 | POST      | `/auth/logout`                                           | Yes                 | Revokes current JWT                                                                    |
 | GET       | `/auth/me`                                               | Yes                 | Revalidates the session and returns current user identity                              |
+| PATCH     | `/auth/account`                                          | Yes                 | `{currentPassword,email?,newPassword?}`; changes credentials and invalidates old sessions |
 | GET       | `/products?page=1&limit=20&search=&category=&active=all` | Yes                 | Paginated product list                                                                 |
 | GET       | `/products/:id`                                          | Yes                 | Product detail                                                                         |
 | POST      | `/products`                                              | Admin               | Create verified product data                                                           |
@@ -49,6 +50,16 @@ Content-Type: application/json
 
 {"email":"admin@example.com","password":"<secret>"}
 ```
+
+```http
+PATCH /api/v1/auth/account
+Authorization: Bearer <jwt>
+Content-Type: application/json
+
+{"currentPassword":"<current-secret>","newPassword":"<new-secret-at-least-12-characters>"}
+```
+
+Changing the login email or password requires the current password and issues a new bearer token. Existing sessions are invalidated.
 
 ```http
 POST /api/v1/products

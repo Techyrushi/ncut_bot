@@ -6,6 +6,7 @@ const userSchema = new Schema(
     passwordHash: { type: String, required: true, select: false },
     name: { type: String, required: true, trim: true },
     role: { type: String, enum: ['ADMIN', 'SALES'], default: 'SALES', index: true },
+    authVersion: { type: Number, default: 0, min: 0 },
     isActive: { type: Boolean, default: true },
   },
   { timestamps: true },

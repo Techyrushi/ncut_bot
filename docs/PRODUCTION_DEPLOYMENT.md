@@ -25,10 +25,37 @@ npm start -w backend
 Build the frontend with its API URL configured at build time:
 
 ```sh
-VITE_API_URL=https://api.example.com/api/v1 npm run build -w frontend
+VITE_API_URL=https://ncut-api.ssdit.in/api/v1 npm run build -w frontend
 ```
 
 Use an external process supervisor/container orchestrator with health checks on `/api/v1/health`, graceful termination, resource limits, rolling deployment, and an operator-managed single webhook worker until queue leases/recovery are implemented. The app expects the proxy to preserve `X-Hub-Signature-256` and the original request body.
+
+## Apache virtual hosts
+
+The checked-in configuration is [deploy/apache/ncut-app.conf](../deploy/apache/ncut-app.conf). It serves the built frontend from `/var/www/ncut-app/frontend/dist` and proxies `ncut-api.ssdit.in` to the backend on `127.0.0.1:5000`.
+
+Install and enable it on the server, then obtain HTTPS certificates:
+
+```sh
+sudo cp deploy/apache/ncut-app.conf /etc/apache2/sites-available/ncut-app.conf
+sudo a2ensite ncut-app.conf
+sudo apachectl configtest
+sudo systemctl reload apache2
+sudo certbot --apache --redirect -d ncut-app.ssdit.in -d ncut-api.ssdit.in
+```
+
+Set `FRONTEND_URL=https://ncut-app.ssdit.in` in the backend environment. Build the frontend after setting `VITE_API_URL` as shown above. Keep the backend listening on port `5000` on localhost; do not expose that port publicly.
+
+For a host-based deployment, set `HOST=127.0.0.1` and use the provided [systemd unit](../deploy/systemd/ncut-app-backend.service) to keep the backend running. The unit runs as the dedicated `ncut-app` system user:
+
+```sh
+sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin ncut-app
+sudo chown root:ncut-app .env
+sudo chmod 640 .env
+sudo cp deploy/systemd/ncut-app-backend.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ncut-app-backend
+```
 
 ## Observability and recovery
 

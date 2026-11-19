@@ -12,6 +12,7 @@ const schema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
     PORT: z.coerce.number().int().positive().default(5000),
+    HOST: z.string().min(1).default('0.0.0.0'),
     APP_URL: z.string().url().default('http://localhost:5000'),
     MONGODB_URI: z.string().min(1, 'MONGODB_URI is required'),
     WHATSAPP_ACCESS_TOKEN: optionalSecret,

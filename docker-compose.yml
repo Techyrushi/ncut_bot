@@ -20,6 +20,7 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
+      HOST: 0.0.0.0
       MONGODB_URI: mongodb://mongo:27017/whatsapp_automation
       FRONTEND_URL: http://localhost:8080
       NODE_ENV: ${NODE_ENV:-development}
