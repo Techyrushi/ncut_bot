@@ -5,8 +5,14 @@ const messageSchema = new Schema(
     customerId: { type: Schema.Types.ObjectId, ref: 'Customer', required: true, index: true },
     conversationId: { type: Schema.Types.ObjectId, ref: 'Conversation', required: true, index: true },
     whatsappMessageId: { type: String, sparse: true, unique: true },
+    bulkCampaignId: { type: Schema.Types.ObjectId, ref: 'BulkCampaign', index: true },
+    bulkRecipientId: { type: Schema.Types.ObjectId, ref: 'BulkCampaignRecipient', index: true },
     direction: { type: String, enum: ['INBOUND', 'OUTBOUND'], required: true },
-    messageType: { type: String, enum: ['TEXT', 'IMAGE', 'INTERACTIVE', 'TEMPLATE', 'UNKNOWN'], required: true },
+    messageType: {
+      type: String,
+      enum: ['TEXT', 'IMAGE', 'VIDEO', 'DOCUMENT', 'INTERACTIVE', 'TEMPLATE', 'UNKNOWN'],
+      required: true,
+    },
     content: { type: Schema.Types.Mixed, required: true },
     status: {
       type: String,

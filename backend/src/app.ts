@@ -20,6 +20,7 @@ import { templatesRouter } from './modules/templates/templates.routes';
 import { settingsRouter } from './modules/settings/settings.routes';
 import { activityLogMiddleware } from './modules/logs/activity-log';
 import { logsRouter } from './modules/logs/logs.routes';
+import { bulkCampaignsRouter } from './modules/bulk-campaigns/bulk-campaigns.routes';
 import mongoose from 'mongoose';
 import { resolve } from 'node:path';
 
@@ -65,6 +66,7 @@ app.use('/api/v1/templates', templatesRouter);
 app.use('/api/v1/dashboard', dashboardRouter);
 app.use('/api/v1/settings', settingsRouter);
 app.use('/api/v1/logs', logsRouter);
+app.use('/api/v1/bulk-campaigns', bulkCampaignsRouter);
 
 app.get('/api/v1/health', (_req, res) => {
   const isConnected = mongoose.connection.readyState === 1;

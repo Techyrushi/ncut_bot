@@ -11,6 +11,7 @@ import { AutomationSettingsPage, WhatsAppSetupPage } from './pages/UtilityPages'
 import { SystemLogsPage } from './pages/SystemLogsPage';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { AccountSecurityPage } from './pages/AccountSecurityPage';
+import { BulkCampaignsPage } from './pages/BulkCampaignsPage';
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } } });
 
@@ -30,6 +31,7 @@ export default function App() {
                   element={<RecordsPage kind="customers" title="Customers" eyebrow="AUDIENCE / DIRECTORY" />}
                 />
                 <Route path="conversations" element={<ConversationsPage />} />
+                <Route path="bulk-campaigns" element={<BulkCampaignsPage />} />
                 <Route path="leads" element={<LeadsPage />} />
                 <Route path="sales-team" element={<TeamPage />} />
                 <Route path="templates" element={<TemplatesPage />} />

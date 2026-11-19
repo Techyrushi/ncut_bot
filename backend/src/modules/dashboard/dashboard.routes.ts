@@ -12,24 +12,42 @@ dashboardRouter.get(
   authenticate,
   requireRoles('ADMIN', 'SALES'),
   asyncHandler(async (_req, res) => {
-    const [totalCustomers, totalConversations, productSelections, totalLeads, pendingLeads, humanHandovers] =
+    const [totalCustomers, conversationStats, productSelections, totalLeads, pendingLeads] =
       await Promise.all([
         Customer.countDocuments(),
-        Conversation.countDocuments(),
-        Conversation.aggregate([{ $group: { _id: null, total: { $sum: '$uniqueProductCount' } } }]),
+        Conversation.aggregate([
+          {
+            $addFields: {
+              activePriority: { $cond: [{ $in: ['$status', ['OPEN', 'HUMAN_HANDOVER']] }, 1, 0] },
+            },
+          },
+          { $sort: { customerId: 1, activePriority: -1, updatedAt: -1, lastMessageAt: -1 } },
+          { $group: { _id: '$customerId', status: { $first: '$status' } } },
+          {
+            $group: {
+              _id: null,
+              totalConversations: { $sum: 1 },
+              humanHandovers: { $sum: { $cond: [{ $eq: ['$status', 'HUMAN_HANDOVER'] }, 1, 0] } },
+            },
+          },
+        ]),
+        Conversation.aggregate([
+          { $unwind: '$selectedProductIds' },
+          { $group: { _id: { customerId: '$customerId', productId: '$selectedProductIds' } } },
+          { $count: 'total' },
+        ]),
         Lead.countDocuments(),
         Lead.countDocuments({ status: 'NEW' }),
-        Conversation.countDocuments({ status: 'HUMAN_HANDOVER' }),
       ]);
     res.json({
       success: true,
       data: {
         totalCustomers,
-        totalConversations,
+        totalConversations: conversationStats[0]?.totalConversations ?? 0,
         totalProductSelections: productSelections[0]?.total ?? 0,
         totalLeads,
         pendingLeads,
-        humanHandovers,
+        humanHandovers: conversationStats[0]?.humanHandovers ?? 0,
       },
     });
   }),

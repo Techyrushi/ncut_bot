@@ -100,6 +100,17 @@ export class WhatsAppService {
     return this.send(to, { type: 'image', image: { link: url, ...(caption ? { caption } : {}) } });
   }
 
+  sendVideo(to: string, url: string, caption?: string): Promise<string> {
+    return this.send(to, { type: 'video', video: { link: url, ...(caption ? { caption } : {}) } });
+  }
+
+  sendDocument(to: string, url: string, filename: string, caption?: string): Promise<string> {
+    return this.send(to, {
+      type: 'document',
+      document: { link: url, filename, ...(caption ? { caption } : {}) },
+    });
+  }
+
   sendButtons(to: string, body: string, buttons: InteractiveButton[]): Promise<string> {
     if (
       buttons.length < 1 ||

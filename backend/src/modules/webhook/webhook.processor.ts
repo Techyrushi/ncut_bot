@@ -4,6 +4,7 @@ import { logger } from '../../config/logger';
 import { recordSystemActivity } from '../logs/activity-log';
 import { WebhookEvent } from '../../database/models/webhook-event.model';
 import { Message } from '../../database/models/message.model';
+import { BulkCampaignRecipient } from '../../database/models/bulk-campaign.model';
 import { automationService } from '../automation/automation.service';
 
 type WebhookChange = {
@@ -85,12 +86,62 @@ async function processStatus(payload: Record<string, unknown>): Promise<void> {
   const messageId = payload.id;
   const status = payload.status;
   if (typeof messageId !== 'string' || typeof status !== 'string' || !statuses.includes(status)) return;
-  const message = await Message.findOneAndUpdate(
-    { whatsappMessageId: messageId },
-    { $set: { status: status.toUpperCase(), ...(payload.errors ? { error: payload.errors } : {}) } },
-    { new: true },
-  );
-  if (!message) throw new Error(`Status update for message ${messageId} arrived before its local message record`);
+  const statusGuard =
+    status === 'sent'
+      ? { status: { $nin: ['DELIVERED', 'READ', 'FAILED'] } }
+      : status === 'delivered'
+        ? { status: { $ne: 'READ' } }
+        : status === 'failed'
+          ? { status: { $nin: ['DELIVERED', 'READ'] } }
+          : {};
+  const message =
+    (await Message.findOneAndUpdate(
+      { whatsappMessageId: messageId, ...statusGuard },
+      { $set: { status: status.toUpperCase(), ...(payload.errors ? { error: payload.errors } : {}) } },
+      { new: true },
+    )) ?? (await Message.findOne({ whatsappMessageId: messageId }));
+  if (!message) {
+    const recipient = await BulkCampaignRecipient.findOne({ whatsappMessageId: messageId });
+    if (!recipient) throw new Error(`Status update for message ${messageId} arrived before its local message record`);
+    const recipientUpdate: Record<string, unknown> = { status: status.toUpperCase() };
+    const eventTimestamp = typeof payload.timestamp === 'string' ? Number(payload.timestamp) * 1000 : Date.now();
+    const receivedAt = Number.isFinite(eventTimestamp) ? new Date(eventTimestamp) : new Date();
+    if (status === 'delivered') recipientUpdate.deliveredAt = receivedAt;
+    if (status === 'read') recipientUpdate.readAt = receivedAt;
+    if (status === 'failed') {
+      recipientUpdate.lastError = JSON.stringify(payload.errors ?? 'WhatsApp reported delivery failure').slice(0, 500);
+    }
+    await BulkCampaignRecipient.updateOne(
+      { _id: recipient._id, ...statusGuard },
+      { $set: recipientUpdate },
+    );
+    return;
+  }
+  if (message.bulkRecipientId) {
+    const effectiveStatus = String(message.status);
+    const update: Record<string, unknown> = { status: effectiveStatus };
+    const eventTimestamp = typeof payload.timestamp === 'string' ? Number(payload.timestamp) * 1000 : Date.now();
+    const receivedAt = Number.isFinite(eventTimestamp) ? new Date(eventTimestamp) : new Date();
+    if (status.toUpperCase() === effectiveStatus && effectiveStatus === 'DELIVERED') update.deliveredAt = receivedAt;
+    if (status.toUpperCase() === effectiveStatus && effectiveStatus === 'READ') update.readAt = receivedAt;
+    if (status.toUpperCase() === effectiveStatus && effectiveStatus === 'FAILED') {
+      update.lastError = JSON.stringify(payload.errors ?? 'WhatsApp reported delivery failure').slice(0, 500);
+    }
+    if (message._id) update.messageId = message._id;
+    update.whatsappMessageId = messageId;
+    const effectiveGuard =
+      effectiveStatus === 'SENT'
+        ? { status: { $nin: ['DELIVERED', 'READ', 'FAILED'] } }
+        : effectiveStatus === 'DELIVERED'
+          ? { status: { $ne: 'READ' } }
+          : effectiveStatus === 'FAILED'
+            ? { status: { $nin: ['DELIVERED', 'READ'] } }
+            : {};
+    await BulkCampaignRecipient.updateOne(
+      { _id: message.bulkRecipientId, ...effectiveGuard },
+      { $set: update },
+    );
+  }
 }
 
 async function processEvent(eventIdValue: string, eventType: string, payload: Record<string, unknown>): Promise<void> {

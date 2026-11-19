@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react';
+import { useDeferredValue, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import type { ApiResponse, PageResult } from '../types/api';
 import { useAuth } from '../contexts/AuthContext';
@@ -263,13 +263,33 @@ export function TemplatesPage() {
 export function LeadsPage() {
   const client = useQueryClient();
   const { user } = useAuth();
+  const [search, setSearch] = useState('');
+  const deferredSearch = useDeferredValue(search.trim());
+  const [statusFilter, setStatusFilter] = useState('ALL');
+  const [assigneeFilter, setAssigneeFilter] = useState('ALL');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+  const [page, setPage] = useState(1);
+  const [assignmentLead, setAssignmentLead] = useState<BasicRecord | null>(null);
+  const [assignmentUserId, setAssignmentUserId] = useState('');
+  const [showAddSalesRep, setShowAddSalesRep] = useState(false);
+  const [salesRepForm, setSalesRepForm] = useState({ name: '', email: '', password: '' });
+  const pageSize = 10;
   const leads = useQuery({
-    queryKey: ['leads'],
-    queryFn: async () => (await api.get<ApiResponse<PageResult<BasicRecord>>>('/leads')).data.data.items,
+    queryKey: ['leads', deferredSearch, statusFilter, assigneeFilter, startDate, endDate, page],
+    queryFn: async () => {
+      const params: Record<string, string | number> = { page, limit: pageSize };
+      if (deferredSearch) params.search = deferredSearch;
+      if (statusFilter !== 'ALL') params.status = statusFilter;
+      if (assigneeFilter !== 'ALL') params.assignedSalesPerson = assigneeFilter;
+      if (startDate) params.startDate = startDate;
+      if (endDate) params.endDate = endDate;
+      return (await api.get<ApiResponse<PageResult<BasicRecord>>>('/leads', { params })).data.data;
+    },
+    refetchOnWindowFocus: true,
   });
   const team = useQuery({
     queryKey: ['team'],
-    enabled: user?.role === 'ADMIN',
     queryFn: async () => (await api.get<ApiResponse<Array<BasicRecord>>>('/team')).data.data,
   });
   const update = useMutation({
@@ -283,97 +303,389 @@ export function LeadsPage() {
     mutationFn: async ({ id, userId }: { id: string; userId: string }) => api.patch(`/leads/${id}/assign`, { userId }),
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: ['leads'] });
+      setAssignmentLead(null);
     },
   });
+  const addSalesRepAndAssign = useMutation({
+    mutationFn: async () => {
+      if (!assignmentLead) throw new Error('Choose a lead before adding a representative.');
+      const { data } = await api.post<ApiResponse<{ id: string }>>('/team', salesRepForm);
+      try {
+        await api.patch(`/leads/${assignmentLead._id}/assign`, { userId: data.data.id });
+      } catch (error) {
+        await Promise.all([
+          client.invalidateQueries({ queryKey: ['team'] }),
+          client.invalidateQueries({ queryKey: ['leads'] }),
+        ]);
+        const detail = error instanceof Error ? error.message : 'assignment confirmation failed';
+        throw new Error(`The sales account was created, but assignment could not be confirmed: ${detail}. Close this dialog and retry from the updated team list.`);
+      }
+      return data.data;
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['leads'] }),
+        client.invalidateQueries({ queryKey: ['team'] }),
+      ]);
+      setAssignmentLead(null);
+      setShowAddSalesRep(false);
+      setSalesRepForm({ name: '', email: '', password: '' });
+    },
+  });
+  const exportLeads = useMutation({
+    mutationFn: async () => {
+      const params: Record<string, string> = {};
+      if (deferredSearch) params.search = deferredSearch;
+      if (statusFilter !== 'ALL') params.status = statusFilter;
+      if (assigneeFilter !== 'ALL') params.assignedSalesPerson = assigneeFilter;
+      if (startDate) params.startDate = startDate;
+      if (endDate) params.endDate = endDate;
+      return api.get('/leads/export.csv', { params, responseType: 'blob' });
+    },
+    onSuccess: (response) => {
+      const url = URL.createObjectURL(response.data as Blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `ncut-leads-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    },
+  });
+  const total = leads.data?.total ?? 0;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const filtersActive =
+    Boolean(search.trim() || startDate || endDate) || statusFilter !== 'ALL' || assigneeFilter !== 'ALL';
+  const teamMembers = team.data ?? [];
+  function clearFilters(): void {
+    setSearch('');
+    setStatusFilter('ALL');
+    setAssigneeFilter('ALL');
+    setStartDate('');
+    setEndDate('');
+    setPage(1);
+  }
   return (
     <div className="page-stack">
       <div className="page-heading">
         <div>
           <div className="eyebrow">SALES / PIPELINE</div>
           <h1>Leads</h1>
-          <p>Prioritize customer requests and record sales outcomes.</p>
+          <p>Review customer requirements, assign ownership, and track each sales outcome.</p>
         </div>
       </div>
       <section className="panel table-panel">
-        <div className="panel-heading">
+        <div className="panel-heading leads-table-heading">
           <div>
             <div className="eyebrow">FOLLOW-UP QUEUE</div>
-            <h2>{leads.data?.length ?? 0} leads</h2>
+            <h2>{total} {total === 1 ? 'lead' : 'leads'}</h2>
+            <p>Use filters to focus the queue. Export downloads all matching leads.</p>
           </div>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => exportLeads.mutate()}
+            disabled={exportLeads.isPending || total === 0}
+          >
+            {exportLeads.isPending ? 'Preparing export…' : 'Export filtered CSV'}
+            <span aria-hidden="true">↓</span>
+          </button>
         </div>
         {leads.isError && (
           <div className="alert error">
             {leads.error instanceof Error ? leads.error.message : 'Unable to load leads.'}
           </div>
         )}
+        {team.isError && (
+          <div className="alert error">
+            {team.error instanceof Error ? team.error.message : 'Unable to load sales assignments.'}
+          </div>
+        )}
+        {update.isError && (
+          <div className="alert error">{update.error instanceof Error ? update.error.message : 'Unable to update lead status.'}</div>
+        )}
+        {assign.isError && (
+          <div className="alert error">{assign.error instanceof Error ? assign.error.message : 'Unable to update lead assignment.'}</div>
+        )}
+        {exportLeads.isError && (
+          <div className="alert error">
+            {exportLeads.error instanceof Error ? exportLeads.error.message : 'Unable to export matching leads.'}
+          </div>
+        )}
+        <div className="table-toolbar leads-toolbar">
+          <label className="table-search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              value={search}
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setPage(1);
+              }}
+              placeholder="Search customer, number, product, requirement, or lead ID…"
+              aria-label="Search leads"
+            />
+          </label>
+          <label className="filter-control">
+            <span>Status</span>
+            <select
+              value={statusFilter}
+              onChange={(event) => {
+                setStatusFilter(event.target.value);
+                setPage(1);
+              }}
+            >
+              <option value="ALL">All statuses</option>
+              <option value="NEW">New</option>
+              <option value="CONTACTED">Contacted</option>
+              <option value="QUALIFIED">Qualified</option>
+              <option value="WON">Won</option>
+              <option value="LOST">Lost</option>
+            </select>
+          </label>
+          <label className="filter-control">
+            <span>Assignee</span>
+            <select
+              value={assigneeFilter}
+              onChange={(event) => {
+                setAssigneeFilter(event.target.value);
+                setPage(1);
+              }}
+            >
+              <option value="ALL">All assignees</option>
+              <option value="assigned">Assigned</option>
+              <option value="unassigned">Unassigned</option>
+              {teamMembers.map((person) => (
+                <option key={person._id} value={person._id}>
+                  {String(person.name)}{person.isActive === true ? '' : ' (inactive)'}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="filter-control">
+            <span>Created from</span>
+            <input
+              type="date"
+              value={startDate}
+              max={endDate || undefined}
+              onChange={(event) => {
+                setStartDate(event.target.value);
+                setPage(1);
+              }}
+            />
+          </label>
+          <label className="filter-control">
+            <span>Created to</span>
+            <input
+              type="date"
+              value={endDate}
+              min={startDate || undefined}
+              onChange={(event) => {
+                setEndDate(event.target.value);
+                setPage(1);
+              }}
+            />
+          </label>
+          {filtersActive && (
+            <button type="button" className="table-reset-button" onClick={clearFilters}>
+              Clear filters
+            </button>
+          )}
+        </div>
+        {leads.isLoading && <div className="table-loading">Loading leads…</div>}
         <div className="table-scroll">
-          <table>
+          <table className="admin-data-table leads-data-table">
             <thead>
               <tr>
                 <th>CUSTOMER</th>
-                <th>PRODUCTS</th>
+                <th>CUSTOMER REQUEST</th>
+                <th>INTERESTED PRODUCTS</th>
                 <th>ASSIGNEE</th>
-                <th>CREATED</th>
                 <th>STATUS</th>
+                <th>LEAD RECEIPT</th>
+                <th>CREATED</th>
+                <th>ACTIONS</th>
               </tr>
             </thead>
             <tbody>
-              {(leads.data ?? []).map((lead) => (
+              {(leads.data?.items ?? []).map((lead) => (
                 <tr key={lead._id}>
-                  <td>{display(lead.customerId)}</td>
-                  <td>{displayMany(lead.selectedProducts)}</td>
+                  <td>
+                    <div className="lead-customer-cell">
+                      <strong>{display(lead.customerId)}</strong>
+                      <span>{customerPhone(lead.customerId) || 'WhatsApp number unavailable'}</span>
+                    </div>
+                  </td>
+                  <td className="lead-requirement-cell">
+                    {typeof lead.requirement === 'string' && lead.requirement.trim() ? lead.requirement : 'Not provided'}
+                  </td>
+                  <td className="lead-products-cell">{displayMany(lead.selectedProducts)}</td>
                   <td>
                     {user?.role === 'ADMIN' ? (
-                      <select
-                        aria-label="Assign sales representative"
-                        value={getId(lead.assignedSalesPerson)}
-                        onChange={(e) => e.target.value && assign.mutate({ id: lead._id, userId: e.target.value })}
+                      <button
+                        type="button"
+                        className="secondary-button lead-assign-button"
+                        onClick={() => {
+                          setAssignmentLead(lead);
+                          setAssignmentUserId(getId(lead.assignedSalesPerson));
+                          setShowAddSalesRep(false);
+                          assign.reset();
+                          addSalesRepAndAssign.reset();
+                        }}
                       >
-                        <option value="">Unassigned</option>
-                        {(team.data ?? [])
-                          .filter((person) => person.isActive === true)
-                          .map((person) => (
-                            <option key={person._id} value={person._id}>
-                              {String(person.name)}
-                            </option>
-                          ))}
-                      </select>
+                        {getId(lead.assignedSalesPerson) ? display(lead.assignedSalesPerson) : 'Assign rep'}
+                      </button>
                     ) : (
-                      display(lead.assignedSalesPerson)
+                      <span className="lead-assignee">{display(lead.assignedSalesPerson)}</span>
                     )}
+                  </td>
+                  <td>
+                    <select
+                      aria-label={`Update status for ${display(lead.customerId)}`}
+                      value={String(lead.status)}
+                      onChange={(e) => update.mutate({ id: lead._id, status: e.target.value })}
+                      disabled={update.isPending && update.variables?.id === lead._id}
+                    >
+                      <option value="NEW">New</option>
+                      <option value="CONTACTED">Contacted</option>
+                      <option value="QUALIFIED">Qualified</option>
+                      <option value="WON">Won</option>
+                      <option value="LOST">Lost</option>
+                    </select>
+                  </td>
+                  <td>
+                    <span className={`status-chip ${lead.notificationStatus === 'SENT' ? 'on' : 'off'}`}>
+                      {String(lead.notificationStatus ?? 'PENDING')}
+                    </span>
                   </td>
                   <td>{formatDate(lead.createdAt)}</td>
                   <td>
-                    <select
-                      value={String(lead.status)}
-                      onChange={(e) => update.mutate({ id: lead._id, status: e.target.value })}
-                    >
-                      <option>NEW</option>
-                      <option>CONTACTED</option>
-                      <option>QUALIFIED</option>
-                      <option>WON</option>
-                      <option>LOST</option>
-                    </select>
+                    {typeof lead.conversationId === 'string' && (
+                      <Link
+                        to={`/conversations?conversation=${encodeURIComponent(lead.conversationId)}`}
+                        className="text-button lead-open-link"
+                      >
+                        Open chat
+                      </Link>
+                    )}
                   </td>
                 </tr>
               ))}
-              {leads.data?.length === 0 && (
+              {leads.data?.items.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="empty-row">
-                    No leads yet.
+                  <td colSpan={8} className="empty-row">
+                    {filtersActive ? 'No leads match these filters. Try broadening your search.' : 'No leads yet.'}
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
+        <div className="table-pagination">
+          <span>
+            {total
+              ? `Showing ${(page - 1) * pageSize + 1}–${Math.min(page * pageSize, total)} of ${total} leads`
+              : 'No matching leads'}
+          </span>
+          <div>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={page === 1 || leads.isFetching}
+              onClick={() => setPage((current) => Math.max(1, current - 1))}
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={page >= pageCount || leads.isFetching}
+              onClick={() => setPage((current) => current + 1)}
+            >
+              Next
+            </button>
+          </div>
+        </div>
       </section>
+      {assignmentLead && (
+        <div className="modal-backdrop" onMouseDown={(event) => {
+          if (event.target === event.currentTarget) setAssignmentLead(null);
+        }}>
+          <section className="modal-card assignment-modal" role="dialog" aria-modal="true" aria-labelledby="assign-lead-title">
+            <div className="panel-heading">
+              <div>
+                <div className="eyebrow">LEAD OWNERSHIP</div>
+                <h2 id="assign-lead-title">Assign sales representative</h2>
+                <p>{display(assignmentLead.customerId)} · {customerPhone(assignmentLead.customerId) || 'WhatsApp number unavailable'}</p>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close assignment dialog" onClick={() => setAssignmentLead(null)}>×</button>
+            </div>
+            {!showAddSalesRep ? (
+              <>
+                <label className="field-label" htmlFor="lead-assignee-select">Sales team member</label>
+                <select
+                  id="lead-assignee-select"
+                  value={assignmentUserId}
+                  onChange={(event) => setAssignmentUserId(event.target.value)}
+                  disabled={team.isLoading}
+                >
+                  <option value="">Unassigned</option>
+                  {teamMembers
+                    .filter((person) => person.isActive === true || person._id === getId(assignmentLead.assignedSalesPerson))
+                    .map((person) => (
+                      <option key={person._id} value={person._id}>
+                        {String(person.name)}{person.isActive === true ? '' : ' (inactive)'}
+                      </option>
+                    ))}
+                </select>
+                {team.isLoading && <p className="form-hint">Loading sales team…</p>}
+                {!team.isLoading && teamMembers.filter((person) => person.isActive === true).length === 0 && (
+                  <p className="form-hint">No active sales representatives yet. Add a team member to assign this lead.</p>
+                )}
+                {assign.error && <p className="form-error" role="alert">{assign.error.message}</p>}
+                <div className="modal-actions">
+                  <button type="button" className="secondary-button" onClick={() => setShowAddSalesRep(true)}>Add sales rep</button>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={assign.isPending || team.isLoading || assignmentUserId === getId(assignmentLead.assignedSalesPerson)}
+                    onClick={() => assign.mutate({ id: assignmentLead._id, userId: assignmentUserId })}
+                  >
+                    {assign.isPending ? 'Saving…' : 'Save assignment'}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <form
+                className="assignment-create-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  addSalesRepAndAssign.mutate();
+                }}
+              >
+                <p className="form-hint">Create a sales account and assign this lead to them.</p>
+                <label className="field-label">Full name<input required maxLength={120} value={salesRepForm.name} onChange={(event) => setSalesRepForm({ ...salesRepForm, name: event.target.value })} /></label>
+                <label className="field-label">Email<input required type="email" value={salesRepForm.email} onChange={(event) => setSalesRepForm({ ...salesRepForm, email: event.target.value })} /></label>
+                <label className="field-label">Temporary password<input required type="password" minLength={12} maxLength={200} autoComplete="new-password" value={salesRepForm.password} onChange={(event) => setSalesRepForm({ ...salesRepForm, password: event.target.value })} /><span className="form-hint">At least 12 characters. Share it securely with the new team member.</span></label>
+                {addSalesRepAndAssign.error && <p className="form-error" role="alert">{addSalesRepAndAssign.error.message}</p>}
+                <div className="modal-actions">
+                  <button type="button" className="secondary-button" onClick={() => setShowAddSalesRep(false)}>Back</button>
+                  <button type="submit" className="primary-button" disabled={addSalesRepAndAssign.isPending}>
+                    {addSalesRepAndAssign.isPending ? 'Creating…' : 'Create and assign'}
+                  </button>
+                </div>
+              </form>
+            )}
+          </section>
+        </div>
+      )}
     </div>
   );
 }
 
 export function ConversationsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const { user } = useAuth();
   const selectedId = searchParams.get('conversation') ?? '';
   const [reply, setReply] = useState('');
   const [templateId, setTemplateId] = useState('');
@@ -568,6 +880,11 @@ export function ConversationsPage() {
           <h1>Conversations</h1>
           <p>Reply to customers and follow WhatsApp delivery and read receipts.</p>
         </div>
+        {user?.role === 'ADMIN' && (
+          <Link to="/bulk-campaigns" className="primary-button">
+            Bulk message
+          </Link>
+        )}
       </div>
       <div className={`content-grid conversation-grid ${selectedId ? 'mobile-has-selection' : ''}`}>
         <section className="panel conversation-list">
@@ -682,9 +999,17 @@ export function ConversationsPage() {
               {(messages.data ?? []).map((message) => {
                 const outbound = message.direction === 'OUTBOUND';
                 const imageUrl = messageImageUrl(message.content);
+                const videoUrl = messageMediaUrl(message.content, 'video');
+                const document = messageDocument(message.content);
                 return (
                   <article className={`message-bubble ${outbound ? 'outbound' : ''}`} key={message._id}>
                     {imageUrl && <img className="message-attachment" src={imageUrl} alt="Shared image" />}
+                    {videoUrl && <video className="message-attachment" src={videoUrl} controls />}
+                    {document && (
+                      <a className="message-document-link" href={document.url} target="_blank" rel="noreferrer">
+                        {document.filename || 'Open document'}
+                      </a>
+                    )}
                     <div>{messageText(message.content)}</div>
                     <small>
                       {outbound ? 'You' : display(selected?.customerId)} · {formatDate(message.timestamp)}
@@ -897,6 +1222,14 @@ function messageText(value: unknown): string {
   const record = value as Record<string, unknown>;
   if (typeof record.caption === 'string') return record.caption;
   if (typeof record.imageUrl === 'string') return '';
+  if (record.video && typeof record.video === 'object') {
+    const video = record.video as Record<string, unknown>;
+    return String(video.caption ?? 'Video attachment');
+  }
+  if (record.document && typeof record.document === 'object') {
+    const document = record.document as Record<string, unknown>;
+    return String(document.caption ?? document.filename ?? 'Document attachment');
+  }
   if (record.image && typeof record.image === 'object') {
     const image = record.image as Record<string, unknown>;
     return String(image.caption ?? 'Image message');
@@ -935,11 +1268,23 @@ function messageImageUrl(value: unknown): string {
   if (!value || typeof value !== 'object') return '';
   const record = value as Record<string, unknown>;
   if (typeof record.imageUrl === 'string') return record.imageUrl;
-  if (record.image && typeof record.image === 'object') {
-    const image = record.image as Record<string, unknown>;
-    return typeof image.link === 'string' ? image.link : '';
-  }
-  return '';
+  return messageMediaUrl(value, 'image');
+}
+function messageMediaUrl(value: unknown, type: 'image' | 'video'): string {
+  if (!value || typeof value !== 'object') return '';
+  const record = value as Record<string, unknown>;
+  const media = record[type];
+  if (!media || typeof media !== 'object') return '';
+  const details = media as Record<string, unknown>;
+  return typeof details.url === 'string' ? details.url : typeof details.link === 'string' ? details.link : '';
+}
+function messageDocument(value: unknown): { url: string; filename: string } | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as Record<string, unknown>;
+  if (!record.document || typeof record.document !== 'object') return undefined;
+  const details = record.document as Record<string, unknown>;
+  const url = typeof details.url === 'string' ? details.url : typeof details.link === 'string' ? details.link : '';
+  return url ? { url, filename: typeof details.filename === 'string' ? details.filename : '' } : undefined;
 }
 function receiptLabel(value: unknown): string {
   switch (String(value)) {

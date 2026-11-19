@@ -36,6 +36,9 @@ teamRouter.post(
         password: z.string().min(12).max(200),
       })
       .parse(req.body);
+    if (await User.exists({ email: input.email })) {
+      throw new ApiError(409, 'A user with this email address already exists', 'EMAIL_ALREADY_EXISTS');
+    }
     const user = await User.create({ ...input, passwordHash: await hash(input.password, 12), role: 'SALES' });
     res.status(201).json({ success: true, data: { id: user.id, name: user.name, email: user.email, role: user.role } });
   }),

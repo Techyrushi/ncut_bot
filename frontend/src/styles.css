@@ -323,10 +323,112 @@ button {
   outline: 2px solid #9bbf3c;
   outline-offset: 1px;
 }
+.account-security-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.85fr);
+  align-items: start;
+  gap: 18px;
+}
 .account-security-form {
   display: grid;
   gap: 18px;
-  max-width: 760px;
+  min-width: 0;
+}
+.account-security-form-heading h2,
+.account-security-tips h2 {
+  margin: 7px 0;
+  font-size: 19px;
+  color: #202b43;
+}
+.account-security-form-heading p,
+.account-security-tips > p {
+  margin: 0;
+  color: #7e8798;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.account-security-submit {
+  justify-self: start;
+}
+.account-security-aside {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.account-profile-card,
+.account-security-tips {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+.account-profile {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.account-profile-avatar {
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 44px;
+  border-radius: 50%;
+  background: #edf5d9;
+  color: #607d25;
+  font-size: 18px;
+  font-weight: 750;
+}
+.account-profile > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+.account-profile strong {
+  color: #202b43;
+  font-size: 14px;
+}
+.account-profile > div span,
+.account-profile-email {
+  color: #7e8798;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.account-profile-email {
+  padding-top: 13px;
+  border-top: 1px solid #edf0f4;
+}
+.account-security-tips {
+  gap: 12px;
+}
+.account-security-tips h2 {
+  margin: 0;
+}
+.account-security-tips ul {
+  display: grid;
+  gap: 13px;
+  padding: 0;
+  margin: 2px 0;
+  list-style: none;
+}
+.account-security-tips li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  color: #536078;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.account-security-tips li span {
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  flex: 0 0 19px;
+  border-radius: 50%;
+  background: #edf7e2;
+  color: #5b8b32;
+  font-size: 11px;
+  font-weight: 750;
 }
 .account-security-form .form-grid > .wide {
   grid-column: 1 / -1;
@@ -1098,6 +1200,9 @@ select {
   .metric-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .account-security-layout {
+    grid-template-columns: minmax(0, 1.2fr) minmax(250px, 0.8fr);
+  }
 }
 @media (max-width: 720px) {
   .logs-status-row {
@@ -1371,6 +1476,70 @@ textarea {
 .table-reset-button:hover {
   color: #31491c;
   text-decoration: underline;
+}
+.leads-table-heading > div {
+  display: grid;
+  gap: 7px;
+}
+.leads-table-heading h2 {
+  margin: 0;
+}
+.leads-table-heading p {
+  margin: 0;
+  color: #7e8798;
+  font-size: 13px;
+}
+.leads-table-heading > .secondary-button {
+  flex: 0 0 auto;
+}
+.leads-toolbar {
+  align-items: flex-end;
+}
+.leads-toolbar .filter-control {
+  min-width: 150px;
+}
+.leads-toolbar input[type='date'] {
+  min-height: 46px;
+  padding: 0 10px;
+  border: 1px solid #dfe4ec;
+  border-radius: 9px;
+  background: #fff;
+  color: #34415a;
+  font-size: 13px;
+}
+.leads-data-table {
+  min-width: 1180px;
+}
+.leads-data-table th,
+.leads-data-table td {
+  vertical-align: middle;
+}
+.lead-customer-cell {
+  display: grid;
+  gap: 5px;
+  min-width: 150px;
+}
+.lead-customer-cell strong {
+  color: #28354d;
+}
+.lead-customer-cell span,
+.lead-assignee {
+  color: #778398;
+  font-size: 12px;
+}
+.lead-requirement-cell {
+  max-width: 260px;
+  white-space: normal;
+  line-height: 1.5;
+}
+.lead-products-cell {
+  min-width: 160px;
+  max-width: 240px;
+  white-space: normal;
+  line-height: 1.5;
+}
+.lead-open-link {
+  white-space: nowrap;
 }
 .table-scroll {
   width: 100%;
@@ -2826,7 +2995,325 @@ td {
   .topbar-right {
     font-size: 0;
   }
+  .account-security-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .account-security-aside {
+    grid-template-columns: minmax(0, 1fr);
+  }
   .metric-value {
     font-size: 34px;
+  }
+}
+
+.lead-assign-button {
+  max-width: 190px;
+  white-space: normal;
+  text-align: left;
+}
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: #101a2d99;
+}
+.modal-card {
+  width: min(520px, 100%);
+  max-height: min(90vh, 760px);
+  overflow: auto;
+  padding: 22px;
+  border: 1px solid #e7eaf0;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 24px 70px #101a2d33;
+}
+.assignment-modal .panel-heading {
+  align-items: flex-start;
+  margin-bottom: 20px;
+}
+.assignment-modal .panel-heading p {
+  margin: 5px 0 0;
+  color: #788296;
+  font-size: 13px;
+}
+.assignment-modal .field-label,
+.assignment-create-form .field-label {
+  display: grid;
+  gap: 7px;
+  margin: 12px 0;
+  color: #42506a;
+  font-size: 13px;
+  font-weight: 650;
+}
+.assignment-modal select,
+.assignment-modal input {
+  width: 100%;
+  max-width: none;
+  min-height: 42px;
+  border: 1px solid #dfe4ec;
+  border-radius: 8px;
+  padding: 9px 11px;
+  color: #26334c;
+  background: #fff;
+  font-size: 14px;
+}
+.assignment-modal .modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 9px;
+  margin-top: 20px;
+}
+.assignment-modal .form-hint {
+  display: block;
+  margin: 5px 0 12px;
+  color: #788296;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.form-error {
+  color: #b42318;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.campaign-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(310px, 0.8fr);
+  align-items: start;
+  gap: 16px;
+}
+.campaign-create-form {
+  display: grid;
+  gap: 15px;
+}
+.campaign-create-form h2,
+.campaign-history h2,
+.campaign-detail h2,
+.campaign-retry-import h2 {
+  margin: 0;
+  color: #202b43;
+  font-size: 20px;
+}
+.campaign-create-form > label,
+.campaign-retry-import .campaign-file-label,
+.campaign-draft-import .campaign-file-label {
+  display: grid;
+  gap: 8px;
+  color: #42506a;
+  font-size: 13px;
+  font-weight: 650;
+}
+.campaign-create-form input:not([type='file']),
+.campaign-create-form textarea,
+.campaign-create-form input[type='file'],
+.campaign-retry-import input[type='file'],
+.campaign-draft-import input[type='file'] {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #dfe4ec;
+  border-radius: 8px;
+  padding: 10px 11px;
+  color: #26334c;
+  background: #fff;
+  font: inherit;
+  font-size: 14px;
+}
+.campaign-create-form textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+.campaign-create-form .form-hint {
+  color: #788296;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+.campaign-policy-note,
+.campaign-preview-notice {
+  padding: 12px 14px;
+  border: 1px solid #e3ebcc;
+  border-radius: 9px;
+  background: #f7faef;
+  color: #586740;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.campaign-file-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  overflow-wrap: anywhere;
+  color: #536078;
+  font-size: 12px;
+}
+.campaign-file-summary button {
+  border: 0;
+  background: transparent;
+  color: #9c3d34;
+  font-weight: 700;
+}
+.campaign-history {
+  min-width: 0;
+}
+.campaign-history-list {
+  display: grid;
+  margin-top: 12px;
+}
+.campaign-history-item {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 8px;
+  border: 0;
+  border-bottom: 1px solid #edf0f4;
+  background: #fff;
+  text-align: left;
+}
+.campaign-history-item.selected,
+.campaign-history-item:hover {
+  background: #f7f9f2;
+}
+.campaign-history-copy {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+.campaign-history-copy strong {
+  overflow: hidden;
+  color: #27324b;
+  font-size: 14px;
+  text-overflow: ellipsis;
+}
+.campaign-history-copy small,
+.campaign-history-count,
+.campaign-empty {
+  color: #788296;
+  font-size: 12px;
+}
+.campaign-history-count {
+  flex: 0 0 auto;
+  text-align: right;
+}
+.campaign-detail {
+  min-width: 0;
+}
+.campaign-detail-heading {
+  align-items: flex-start;
+}
+.campaign-detail-heading p {
+  margin: 6px 0 0;
+  color: #788296;
+  font-size: 13px;
+}
+.campaign-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  gap: 9px;
+  margin: 18px 0;
+}
+.campaign-stat {
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+  border: 1px solid #edf0f4;
+  border-radius: 9px;
+  background: #fbfcfd;
+}
+.campaign-stat span {
+  color: #788296;
+  font-size: 11px;
+  font-weight: 700;
+}
+.campaign-stat strong {
+  color: #202b43;
+  font-size: 24px;
+}
+.campaign-preview-notice {
+  display: grid;
+  gap: 3px;
+  margin-top: 17px;
+}
+.campaign-recipient-toolbar,
+.campaign-draft-import {
+  display: flex;
+  justify-content: space-between;
+  align-items: end;
+  gap: 12px;
+  margin: 15px 0;
+}
+.campaign-recipient-toolbar .filter-control {
+  display: grid;
+  gap: 5px;
+  color: #788296;
+  font-size: 12px;
+}
+.campaign-recipient-toolbar select {
+  max-width: 220px;
+  min-height: 38px;
+  font-size: 13px;
+}
+.campaign-recipient-table {
+  min-width: 850px;
+}
+.message-attachment {
+  display: block;
+  max-width: min(100%, 360px);
+  max-height: 340px;
+  margin-bottom: 6px;
+  border-radius: 7px;
+}
+.message-document-link {
+  display: inline-block;
+  max-width: 100%;
+  margin-bottom: 6px;
+  color: #355e8b;
+  overflow-wrap: anywhere;
+}
+.campaign-retry-import {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) minmax(220px, 1fr) auto;
+  align-items: end;
+  gap: 16px;
+}
+.campaign-retry-import p {
+  margin: 5px 0 0;
+  color: #788296;
+  font-size: 13px;
+}
+@media (max-width: 900px) {
+  .campaign-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 720px) {
+  .assignment-modal .modal-actions,
+  .campaign-detail-heading,
+  .campaign-recipient-toolbar,
+  .campaign-draft-import {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .campaign-detail-heading {
+    display: flex;
+  }
+  .campaign-recipient-toolbar .secondary-button,
+  .campaign-detail-heading .primary-button,
+  .campaign-draft-import .secondary-button {
+    width: 100%;
+  }
+  .campaign-stat-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .campaign-retry-import {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .campaign-history-item {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

@@ -5,8 +5,14 @@ import type { ApiResponse, DashboardStats } from '../types/api';
 
 const metrics: Array<{ key: keyof DashboardStats; label: string; note: string; accent: string; icon: string }> = [
   { key: 'totalCustomers', label: 'Total customers', note: 'Customer directory', accent: 'lavender', icon: '◎' },
-  { key: 'totalConversations', label: 'Conversations', note: 'N-CUT customer enquiries', accent: 'blue', icon: '◌' },
-  { key: 'totalProductSelections', label: 'Product selections', note: 'Unique interests', accent: 'orange', icon: '▧' },
+  { key: 'totalConversations', label: 'Conversations', note: 'Unique customer threads', accent: 'blue', icon: '◌' },
+  {
+    key: 'totalProductSelections',
+    label: 'Product selections',
+    note: 'Unique products selected by customers',
+    accent: 'orange',
+    icon: '▧',
+  },
   { key: 'totalLeads', label: 'Sales leads', note: 'Created from handovers', accent: 'green', icon: '↗' },
   { key: 'pendingLeads', label: 'Pending leads', note: 'Awaiting first contact', accent: 'yellow', icon: '◷' },
   { key: 'humanHandovers', label: 'Human handovers', note: 'Active sales conversations', accent: 'pink', icon: '↔' },

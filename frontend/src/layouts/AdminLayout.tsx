@@ -12,6 +12,7 @@ const navItems = [
   ['/products', 'Products'],
   ['/customers', 'Customers'],
   ['/conversations', 'Conversations'],
+  ['/bulk-campaigns', 'Bulk messages'],
   ['/leads', 'Leads'],
   ['/whatsapp', 'WhatsApp setup'],
   ['/account-security', 'Account security'],
@@ -59,7 +60,11 @@ export function AdminLayout() {
         <div className="workspace-label">WORKSPACE</div>
         <nav className="nav-list">
           {navItems
-            .filter(([path]) => path !== '/logs' || user?.role === 'ADMIN')
+            .filter(
+              ([path]) =>
+                (path !== '/logs' || user?.role === 'ADMIN') &&
+                (path !== '/bulk-campaigns' || user?.role === 'ADMIN'),
+            )
             .map(([path, label], index) => (
               <NavLink
                 key={path}

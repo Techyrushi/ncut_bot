@@ -7,26 +7,31 @@ import type { Server } from 'node:http';
 import { startWebhookWorker } from './modules/webhook/webhook.processor';
 import { initializeAdminUser } from './modules/auth/bootstrap';
 import { recordSystemActivity } from './modules/logs/activity-log';
+import { recoverInterruptedCampaignSends, startBulkCampaignWorker } from './modules/bulk-campaigns/bulk-campaign.service';
 
 async function start(): Promise<void> {
   await connectDatabase();
   await initializeAdminUser();
+  await recoverInterruptedCampaignSends();
   await recordSystemActivity('API_STARTED', 'Backend connected to the database and started');
   const worker = startWebhookWorker();
   worker.unref();
+  const campaignWorker = startBulkCampaignWorker();
+  campaignWorker.unref();
   const server = app.listen(env.PORT, env.HOST, () =>
     logger.info({ host: env.HOST, port: env.PORT }, 'HTTP server listening'),
   );
-  registerShutdown(server, worker);
+  registerShutdown(server, worker, campaignWorker);
 }
 
-function registerShutdown(server: Server, worker: NodeJS.Timeout): void {
+function registerShutdown(server: Server, worker: NodeJS.Timeout, campaignWorker: NodeJS.Timeout): void {
   let shuttingDown = false;
   const shutdown = (signal: string): void => {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info({ signal }, 'Graceful shutdown started');
     clearInterval(worker);
+    clearInterval(campaignWorker);
     void recordSystemActivity('API_STOPPED', `Backend shutdown requested (${signal})`).finally(() => {
       server.close((error) => {
         if (error) {

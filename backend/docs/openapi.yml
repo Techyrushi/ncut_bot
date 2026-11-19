@@ -212,12 +212,29 @@ paths:
         '409': { description: Conversation is not in human handover }
   /leads:
     get:
-      summary: List and filter sales leads
+      summary: Search, filter, and paginate sales leads
       parameters:
-        - { in: query, name: status, schema: { type: string } }
-        - { in: query, name: assignedSalesPerson, schema: { type: string } }
+        - { in: query, name: search, description: Search customer name/number, product name/category, customer requirement, or lead ID, schema: { type: string, maxLength: 200 } }
+        - { in: query, name: status, schema: { type: string, enum: [NEW, CONTACTED, QUALIFIED, WON, LOST] } }
+        - { in: query, name: assignedSalesPerson, description: Use assigned, unassigned, or a sales user ID, schema: { type: string } }
+        - { in: query, name: startDate, description: Inclusive creation date in UTC, schema: { type: string, format: date } }
+        - { in: query, name: endDate, description: Inclusive creation date in UTC, schema: { type: string, format: date } }
+        - { in: query, name: page, schema: { type: integer, minimum: 1 } }
+        - { in: query, name: limit, schema: { type: integer, maximum: 100 } }
       responses:
         '200': { description: Paginated leads }
+        '400': { description: Invalid filter or date range }
+  /leads/export.csv:
+    get:
+      summary: Export every lead matching the active filters as CSV
+      parameters:
+        - { in: query, name: search, schema: { type: string, maxLength: 200 } }
+        - { in: query, name: status, schema: { type: string, enum: [NEW, CONTACTED, QUALIFIED, WON, LOST] } }
+        - { in: query, name: assignedSalesPerson, schema: { type: string } }
+        - { in: query, name: startDate, schema: { type: string, format: date } }
+        - { in: query, name: endDate, schema: { type: string, format: date } }
+      responses:
+        '200': { description: Filtered CSV file }
   /leads/{id}:
     parameters:
       - { in: path, name: id, required: true, schema: { type: string } }
@@ -257,6 +274,94 @@ paths:
                 userId: { type: string }
       responses:
         '200': { description: Lead assigned }
+  /bulk-campaigns/media:
+    post:
+      summary: Upload a WhatsApp campaign attachment
+      description: Administrator-only raw binary upload. Images are limited to 5 MiB, MP4 to 16 MiB, and supported documents to 20 MiB.
+      requestBody:
+        required: true
+        content:
+          image/jpeg:
+            schema: { type: string, format: binary }
+          image/png:
+            schema: { type: string, format: binary }
+          video/mp4:
+            schema: { type: string, format: binary }
+          application/pdf:
+            schema: { type: string, format: binary }
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        '201': { description: Uploaded asset metadata and public WhatsApp-fetchable URL }
+        '400': { description: Invalid binary content }
+        '413': { description: Attachment exceeds its size limit }
+  /bulk-campaigns:
+    get:
+      summary: List campaign previews and delivery summaries
+      responses:
+        '200': { description: Paginated administrator campaign history }
+    post:
+      summary: Create a campaign draft
+      description: Requires message text or an uploaded attachment. Does not send messages.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, maxLength: 120 }
+                message: { type: string, maxLength: 4096 }
+                attachment: { type: object, description: Metadata returned by the media upload endpoint }
+      responses:
+        '201': { description: Draft campaign created }
+        '400': { description: Invalid campaign content }
+  /bulk-campaigns/{id}/import:
+    post:
+      summary: Import and preview campaign recipients
+      description: Accepts CSV or XLSX with a phone/mobile column or first-column phone numbers. Deduplicates normalized numbers and marks unknown, non-opted-in, and expired-window recipients UNSENT.
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          text/csv:
+            schema: { type: string, format: binary }
+          application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+            schema: { type: string, format: binary }
+      responses:
+        '200': { description: Eligibility preview with duplicate, eligible, and unsent counts }
+        '409': { description: Campaign is not a draft or recipients were already imported }
+        '413': { description: Import exceeds the 5 MiB, 5,000-row, or 500-unique-recipient limit }
+  /bulk-campaigns/{id}/send:
+    post:
+      summary: Queue a previewed campaign for paced delivery
+      description: Queues only recipients still eligible for sending. The worker rechecks opt-in and the 24-hour service window before each message.
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '202': { description: Campaign queued for delivery }
+        '409': { description: Campaign is not ready or has no eligible recipients }
+  /bulk-campaigns/{id}:
+    get:
+      summary: Read campaign progress and recipient delivery statuses
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+        - { in: query, name: status, schema: { type: string, enum: [UNSENT, QUEUED, SENDING, SENT, DELIVERED, READ, FAILED] } }
+        - { in: query, name: page, schema: { type: integer, minimum: 1 } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100 } }
+      responses:
+        '200': { description: Campaign detail, recipient page, and per-status counts }
+        '404': { description: Campaign not found }
+  /bulk-campaigns/{id}/export.csv:
+    get:
+      summary: Export campaign recipient activity
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+        - { in: query, name: status, schema: { type: string, enum: [UNSENT, QUEUED, SENDING, SENT, DELIVERED, READ, FAILED] } }
+      responses:
+        '200': { description: Formula-safe CSV recipient activity export }
   /team:
     get:
       summary: List sales representatives

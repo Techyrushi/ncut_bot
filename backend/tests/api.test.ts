@@ -3,16 +3,23 @@ import { randomUUID } from 'node:crypto';
 import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
 import request from 'supertest';
+import ExcelJS from 'exceljs';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { app } from '../src/app';
 import { User } from '../src/database/models/user.model';
 import { RevokedToken } from '../src/database/models/revoked-token.model';
 import { Product } from '../src/database/models/product.model';
+import { Lead } from '../src/database/models/lead.model';
 import { Conversation } from '../src/database/models/conversation.model';
 import { Customer } from '../src/database/models/customer.model';
 import { Message } from '../src/database/models/message.model';
 import { ActivityLog } from '../src/database/models/activity-log.model';
+import { BulkCampaign, BulkCampaignRecipient } from '../src/database/models/bulk-campaign.model';
+import { WebhookEvent } from '../src/database/models/webhook-event.model';
 import { env } from '../src/config/env';
+import { enqueueWebhookPayload, processPendingWebhookEvents } from '../src/modules/webhook/webhook.processor';
+import { processBulkCampaignQueue } from '../src/modules/bulk-campaigns/bulk-campaign.service';
+import { whatsappService } from '../src/modules/whatsapp/whatsapp.service';
 
 let mongo: MongoMemoryServer;
 
@@ -25,8 +32,12 @@ beforeAll(async () => {
     Product.init(),
     Customer.init(),
     Conversation.init(),
+    Lead.init(),
     Message.init(),
     ActivityLog.init(),
+    BulkCampaign.init(),
+    BulkCampaignRecipient.init(),
+    WebhookEvent.init(),
   ]);
 });
 
@@ -37,8 +48,12 @@ afterEach(async () => {
     Product.deleteMany({}),
     Customer.deleteMany({}),
     Conversation.deleteMany({}),
+    Lead.deleteMany({}),
     Message.deleteMany({}),
     ActivityLog.deleteMany({}),
+    BulkCampaign.deleteMany({}),
+    BulkCampaignRecipient.deleteMany({}),
+    WebhookEvent.deleteMany({}),
   ]);
   jest.restoreAllMocks();
 });
@@ -310,6 +325,170 @@ it('resumes automation from sales handover and resets product-flow state', async
   expect(resumed.body.data).not.toHaveProperty('currentCategory');
 });
 
+it('counts unique customer threads and distinct customer product interests on the dashboard', async () => {
+  await User.create({
+    email: 'admin@example.com',
+    name: 'Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const login = await request(app).post('/api/v1/auth/login').send({
+    email: 'admin@example.com',
+    password: 'long-test-password',
+  });
+  const token = login.body.data.token as string;
+  const [returningCustomer, otherCustomer] = await Customer.create([
+    { whatsappId: '15550001114', phoneNumber: '15550001114' },
+    { whatsappId: '15550001115', phoneNumber: '15550001115' },
+  ]);
+  const flapProductId = new mongoose.Types.ObjectId();
+  const padProductId = new mongoose.Types.ObjectId();
+  await Conversation.create([
+    {
+      customerId: returningCustomer!._id,
+      status: 'CLOSED',
+      currentStep: 'CLOSED',
+      selectedProductIds: [flapProductId],
+      uniqueProductCount: 1,
+    },
+    {
+      customerId: returningCustomer!._id,
+      status: 'HUMAN_HANDOVER',
+      currentStep: 'HUMAN_HANDOVER',
+      selectedProductIds: [flapProductId, padProductId],
+      uniqueProductCount: 2,
+    },
+    {
+      customerId: otherCustomer!._id,
+      status: 'OPEN',
+      currentStep: 'WELCOME_SENT',
+    },
+  ]);
+
+  const result = await request(app).get('/api/v1/dashboard/stats').set('authorization', `Bearer ${token}`);
+
+  expect(result.status).toBe(200);
+  expect(result.body.data).toMatchObject({
+    totalCustomers: 2,
+    totalConversations: 2,
+    totalProductSelections: 2,
+    humanHandovers: 1,
+  });
+});
+
+it('filters and exports accurate lead data and supports status and assignment changes', async () => {
+  const [admin, sales] = await User.create([
+    {
+      email: 'admin@example.com',
+      name: 'Admin',
+      passwordHash: await hash('long-test-password', 4),
+      role: 'ADMIN',
+    },
+    {
+      email: 'sales@example.com',
+      name: 'Sales Rep',
+      passwordHash: await hash('long-test-password', 4),
+      role: 'SALES',
+    },
+  ]);
+  const token = jwt.sign({ role: admin!.role, ver: admin!.authVersion ?? 0 }, env.JWT_SECRET, {
+    subject: admin!.id,
+    jwtid: randomUUID(),
+    expiresIn: '1h',
+  });
+  const [customer, otherCustomer] = await Customer.create([
+    { whatsappId: '15550001116', phoneNumber: '15550001116', profileName: 'Rushikesh Customer' },
+    { whatsappId: '15550001117', phoneNumber: '15550001117', profileName: 'Other Customer' },
+  ]);
+  const product = await Product.create({
+    name: 'Flap Disc',
+    slug: 'lead-filter-flap-disc',
+    description: 'Grinding and finishing',
+    category: 'Abrasives',
+  });
+  const lead = await Lead.create({
+    customerId: customer!._id,
+    conversationId: new mongoose.Types.ObjectId(),
+    selectedProducts: [product._id],
+    assignedSalesPerson: sales!._id,
+    status: 'QUALIFIED',
+    notificationStatus: 'SENT',
+    requirement: '=2+2',
+  });
+  await Lead.create({
+    customerId: otherCustomer!._id,
+    conversationId: new mongoose.Types.ObjectId(),
+    status: 'NEW',
+  });
+
+  const filtered = await request(app)
+    .get('/api/v1/leads')
+    .query({
+      status: 'QUALIFIED',
+      assignedSalesPerson: sales!.id,
+      search: 'Rushikesh',
+      startDate: new Date().toISOString().slice(0, 10),
+      endDate: new Date().toISOString().slice(0, 10),
+    })
+    .set('authorization', `Bearer ${token}`);
+  expect(filtered.status).toBe(200);
+  expect(filtered.body.data.total).toBe(1);
+  expect(filtered.body.data.items[0]).toMatchObject({
+    _id: lead.id,
+    status: 'QUALIFIED',
+    notificationStatus: 'SENT',
+    requirement: '=2+2',
+    customerId: { profileName: 'Rushikesh Customer', phoneNumber: '15550001116' },
+    selectedProducts: [{ name: 'Flap Disc' }],
+    assignedSalesPerson: { name: 'Sales Rep', isActive: true },
+  });
+
+  const csv = await request(app)
+    .get('/api/v1/leads/export.csv')
+    .query({ status: 'QUALIFIED', assignedSalesPerson: sales!.id, search: 'Rushikesh' })
+    .set('authorization', `Bearer ${token}`);
+  expect(csv.status).toBe(200);
+  expect(csv.headers['content-type']).toContain('text/csv');
+  expect(csv.text).toContain('Rushikesh Customer');
+  expect(csv.text).toContain('Flap Disc');
+  expect(csv.text).toContain(`"'=2+2"`);
+  expect(csv.text).not.toContain('Other Customer');
+
+  const requirementSearch = await request(app)
+    .get('/api/v1/leads')
+    .query({ search: '2+2' })
+    .set('authorization', `Bearer ${token}`);
+  expect(requirementSearch.body.data.total).toBe(1);
+  const assignedFilter = await request(app)
+    .get('/api/v1/leads')
+    .query({ assignedSalesPerson: 'assigned' })
+    .set('authorization', `Bearer ${token}`);
+  expect(assignedFilter.body.data.total).toBe(1);
+  const invalidDateRange = await request(app)
+    .get('/api/v1/leads')
+    .query({ startDate: '2026-11-20', endDate: '2026-11-19' })
+    .set('authorization', `Bearer ${token}`);
+  expect(invalidDateRange.status).toBe(400);
+
+  const status = await request(app)
+    .patch(`/api/v1/leads/${lead.id}/status`)
+    .set('authorization', `Bearer ${token}`)
+    .send({ status: 'WON' });
+  expect(status.status).toBe(200);
+  expect(status.body.data.status).toBe('WON');
+  const unassigned = await request(app)
+    .patch(`/api/v1/leads/${lead.id}/assign`)
+    .set('authorization', `Bearer ${token}`)
+    .send({ userId: '' });
+  expect(unassigned.status).toBe(200);
+  expect(unassigned.body.data.assignedSalesPerson).toBeUndefined();
+  const unassignedFilter = await request(app)
+    .get('/api/v1/leads')
+    .query({ assignedSalesPerson: 'unassigned' })
+    .set('authorization', `Bearer ${token}`);
+  expect(unassignedFilter.body.data.total).toBe(2);
+});
+
 it('filters and searches customer records with pagination metadata', async () => {
   await User.create({
     email: 'admin@example.com',
@@ -341,6 +520,206 @@ it('filters and searches customer records with pagination metadata', async () =>
     .query({ optInStatus: 'INVALID' })
     .set('authorization', `Bearer ${token}`);
   expect(invalidFilter.status).toBe(400);
+});
+
+it('previews bulk recipients with deduplication, consent and service-window safeguards', async () => {
+  const admin = await User.create({
+    email: 'admin@example.com',
+    name: 'Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const token = jwt.sign({ role: admin.role, ver: admin.authVersion ?? 0 }, env.JWT_SECRET, {
+    subject: admin.id,
+    jwtid: randomUUID(),
+    expiresIn: '1h',
+  });
+  const customer = await Customer.create({
+    whatsappId: '919175731328',
+    phoneNumber: '9175731328',
+    optInStatus: 'OPTED_IN',
+  });
+  await Conversation.create({
+    customerId: customer._id,
+    status: 'OPEN',
+    lastInteractionAt: new Date(),
+  });
+  const optedOut = await Customer.create({
+    whatsappId: '918888888888',
+    phoneNumber: '918888888888',
+    optInStatus: 'OPTED_OUT',
+  });
+  const expired = await Customer.create({
+    whatsappId: '919999999999',
+    phoneNumber: '919999999999',
+    optInStatus: 'OPTED_IN',
+  });
+  await Conversation.create([
+    { customerId: optedOut._id, status: 'OPEN', lastInteractionAt: new Date() },
+    { customerId: expired._id, status: 'OPEN', lastInteractionAt: new Date(Date.now() - 25 * 60 * 60 * 1000) },
+  ]);
+
+  const created = await request(app)
+    .post('/api/v1/bulk-campaigns')
+    .set('authorization', `Bearer ${token}`)
+    .send({ name: 'Preview test', message: 'A business update' });
+  expect(created.status).toBe(201);
+  const campaignId = created.body.data._id as string;
+  const imported = await request(app)
+    .post(`/api/v1/bulk-campaigns/${campaignId}/import`)
+    .set('authorization', `Bearer ${token}`)
+    .set('content-type', 'text/csv')
+    .send(Buffer.from('Mobile Number\n9175731328\n+91 91757 31328\n918888888888\n919999999999\n912222222222\nnot-a-number\n'));
+
+  expect(imported.status).toBe(200);
+  expect(imported.body.data).toMatchObject({
+    rows: 6,
+    uniqueRecipients: 5,
+    duplicateRows: 1,
+    eligible: 1,
+    unsent: 4,
+  });
+
+  const preview = await request(app)
+    .get(`/api/v1/bulk-campaigns/${campaignId}`)
+    .set('authorization', `Bearer ${token}`);
+  expect(preview.body.data.statusCounts).toMatchObject({ UNSENT: 5 });
+  expect(preview.body.data.campaign.status).toBe('READY');
+
+  const queued = await request(app)
+    .post(`/api/v1/bulk-campaigns/${campaignId}/send`)
+    .set('authorization', `Bearer ${token}`);
+  expect(queued.status).toBe(202);
+  expect(queued.body.data.queued).toBe(1);
+  expect(await BulkCampaignRecipient.countDocuments({ campaignId, status: 'QUEUED' })).toBe(1);
+  expect(await BulkCampaignRecipient.countDocuments({ campaignId, status: 'UNSENT' })).toBe(4);
+});
+
+it('updates campaign recipient delivery status from the WhatsApp webhook', async () => {
+  const admin = await User.create({
+    email: 'admin@example.com',
+    name: 'Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const customer = await Customer.create({ whatsappId: '919175731329' });
+  const conversation = await Conversation.create({ customerId: customer._id });
+  const campaign = await BulkCampaign.create({
+    name: 'Status test',
+    message: 'A business update',
+    createdBy: admin._id,
+    status: 'PROCESSING',
+  });
+  const recipient = await BulkCampaignRecipient.create({
+    campaignId: campaign._id,
+    recipientKey: '919175731329',
+    phoneNumber: '919175731329',
+    customerId: customer._id,
+    sourceRow: 2,
+    eligible: true,
+    status: 'SENT',
+    whatsappMessageId: 'wamid.bulk-status-test',
+  });
+  await Message.create({
+    customerId: customer._id,
+    conversationId: conversation._id,
+    whatsappMessageId: 'wamid.bulk-status-test',
+    bulkCampaignId: campaign._id,
+    bulkRecipientId: recipient._id,
+    direction: 'OUTBOUND',
+    messageType: 'TEXT',
+    content: { text: 'A business update' },
+    status: 'SENT',
+    timestamp: new Date(),
+  });
+
+  await enqueueWebhookPayload({
+    entry: [{ changes: [{ value: { statuses: [{ id: 'wamid.bulk-status-test', status: 'delivered', timestamp: '1770000000' }] } }] }],
+  });
+  await processPendingWebhookEvents();
+
+  const updated = await BulkCampaignRecipient.findById(recipient._id).lean();
+  expect(updated?.status).toBe('DELIVERED');
+  expect(updated?.deliveredAt).toBeInstanceOf(Date);
+});
+
+it('imports XLSX recipients and refuses to queue a campaign with no eligible customers', async () => {
+  const admin = await User.create({
+    email: 'admin@example.com',
+    name: 'Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const token = jwt.sign({ role: admin.role, ver: admin.authVersion ?? 0 }, env.JWT_SECRET, {
+    subject: admin.id,
+    jwtid: randomUUID(),
+    expiresIn: '1h',
+  });
+  const created = await request(app)
+    .post('/api/v1/bulk-campaigns')
+    .set('authorization', `Bearer ${token}`)
+    .send({ name: 'XLSX preview', message: 'A business update' });
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet('Recipients');
+  sheet.addRow(['Mobile Number']);
+  sheet.addRow([9175731328]);
+  const bytes = Buffer.from(await workbook.xlsx.writeBuffer());
+
+  const imported = await request(app)
+    .post(`/api/v1/bulk-campaigns/${created.body.data._id}/import`)
+    .set('authorization', `Bearer ${token}`)
+    .set('content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    .send(bytes);
+  expect(imported.status).toBe(200);
+  expect(imported.body.data).toMatchObject({ rows: 1, eligible: 0, unsent: 1 });
+
+  const send = await request(app)
+    .post(`/api/v1/bulk-campaigns/${created.body.data._id}/send`)
+    .set('authorization', `Bearer ${token}`);
+  expect(send.status).toBe(409);
+  expect(send.body.error.code).toBe('NO_ELIGIBLE_RECIPIENTS');
+  expect(await BulkCampaignRecipient.countDocuments({ status: 'QUEUED' })).toBe(0);
+});
+
+it('rechecks opt-in immediately before delivery and leaves a newly opted-out contact unsent', async () => {
+  const admin = await User.create({
+    email: 'admin@example.com',
+    name: 'Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const token = jwt.sign({ role: admin.role, ver: admin.authVersion ?? 0 }, env.JWT_SECRET, {
+    subject: admin.id,
+    jwtid: randomUUID(),
+    expiresIn: '1h',
+  });
+  const customer = await Customer.create({
+    whatsappId: '919175731330',
+    optInStatus: 'OPTED_IN',
+  });
+  await Conversation.create({ customerId: customer._id, status: 'OPEN', lastInteractionAt: new Date() });
+  const created = await request(app)
+    .post('/api/v1/bulk-campaigns')
+    .set('authorization', `Bearer ${token}`)
+    .send({ name: 'Consent recheck', message: 'A business update' });
+  const campaignId = created.body.data._id as string;
+  await request(app)
+    .post(`/api/v1/bulk-campaigns/${campaignId}/import`)
+    .set('authorization', `Bearer ${token}`)
+    .set('content-type', 'text/csv')
+    .send(Buffer.from('Phone\n9175731330\n'));
+  await request(app)
+    .post(`/api/v1/bulk-campaigns/${campaignId}/send`)
+    .set('authorization', `Bearer ${token}`);
+
+  await Customer.updateOne({ _id: customer._id }, { $set: { optInStatus: 'OPTED_OUT' } });
+  const send = jest.spyOn(whatsappService, 'sendText');
+  await processBulkCampaignQueue();
+
+  const recipient = await BulkCampaignRecipient.findOne({ campaignId }).lean();
+  expect(recipient?.status).toBe('UNSENT');
+  expect(recipient?.reason).toBe('Customer is missing or no longer opted in');
+  expect(send).not.toHaveBeenCalled();
 });
 
 it('records authenticated write activity and exposes it only to administrators', async () => {

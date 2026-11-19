@@ -1,4 +1,5 @@
 import { ActivityLog } from './activity-log.model';
+import { BulkCampaign, BulkCampaignRecipient } from './bulk-campaign.model';
 import { Conversation } from './conversation.model';
 import { Customer } from './customer.model';
 import { Lead } from './lead.model';
@@ -12,6 +13,8 @@ import { WorkspaceSettings } from './workspace-settings.model';
 
 const models = [
   ActivityLog,
+  BulkCampaign,
+  BulkCampaignRecipient,
   Conversation,
   Customer,
   Lead,
