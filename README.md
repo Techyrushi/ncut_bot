@@ -13,7 +13,7 @@ A TypeScript monorepo for managing an abrasive-product catalogue, automating pro
 - Human handover, sales lead creation, and configurable log/webhook notification.
 - Product, customer, conversation, lead, team, template, authentication, and dashboard APIs.
 - Self-service account email/password changes with prior-session invalidation and accessible show/hide password controls.
-- Responsive authenticated React dashboard, catalogue entry, QR click-to-chat builder, and operational views.
+- Responsive authenticated React dashboard, optimistic catalogue entry with local image uploads, QR click-to-chat builder, and an unread-aware WhatsApp conversation inbox.
 - Zod request validation, JWT roles/revocation, bcrypt passwords, Helmet, CORS, rate limits, structured logs, and safe API errors.
 - Docker Compose, TypeScript checks, and Jest/Supertest tests using MongoDB Memory Server.
 
@@ -99,7 +99,7 @@ Set the public frontend `VITE_API_URL` in `frontend/.env.local` (see `frontend/.
 
 ## Catalogue and automation data
 
-Create products using the admin API or dashboard. The menu includes the requested 12 product category names, but catalogue descriptions, images, sizes, grit ranges, colours, backing, and specifications must be supplied from verified business data. The application does not fabricate specs. See [docs/DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md).
+Create products using the admin API or dashboard. The menu includes the 13 product categories from the provided workflow document; catalogue descriptions, images, sizes, grit ranges, colours, backing, and specifications must be supplied from verified business data. The application does not fabricate specs. See [docs/DATABASE_SCHEMA.md](docs/DATABASE_SCHEMA.md).
 
 The automation flow welcomes a new inbound customer, presents the paginated category/product menus, sends saved product data, atomically adds distinct product IDs to the conversation, prompts after the third unique interest only once, and creates a sales lead on handover. The session expires after seven days without interaction. Human handover turns off automated replies until a representative closes the conversation through an operational workflow.
 
@@ -111,9 +111,9 @@ All endpoints are prefixed with `/api/v1`. Authenticated admin endpoints require
 | ------------------------- | --------------------------------------------------------------------------------------------- |
 | Health                    | `GET /health`                                                                                 |
 | Auth                      | `POST /auth/login`, `POST /auth/logout`, `GET /auth/me`                                       |
-| Products                  | `GET/POST /products`, `GET/PUT/DELETE /products/:id`                                          |
+| Products                  | `GET/POST /products`, `POST /products/image-upload`, `GET/PUT/DELETE /products/:id`          |
 | Customers                 | `GET /customers`, `GET /customers/:id`                                                        |
-| Conversations             | `GET /conversations`, `GET /conversations/:id`, `GET /conversations/:id/messages`             |
+| Conversations             | `GET /conversations`, `GET /conversations/:id`, `GET /conversations/:id/messages`, `POST /conversations/:id/read` |
 | Customers / conversations | `PATCH /customers/:id/opt-in`, `PATCH /conversations/:id/status`                              |
 | Leads                     | `GET /leads`, `GET /leads/:id`, `PATCH /leads/:id/status`, `PATCH /leads/:id/assign`          |
 | Team/templates            | `/team`, `/templates`                                                                         |

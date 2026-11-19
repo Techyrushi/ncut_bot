@@ -39,6 +39,13 @@ const schema = z
   })
   .superRefine((config, context) => {
     if (config.NODE_ENV === 'production') {
+      if (!config.APP_URL.startsWith('https://')) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['APP_URL'],
+          message: 'must be a public HTTPS origin in production',
+        });
+      }
       const required = [
         'WHATSAPP_ACCESS_TOKEN',
         'WHATSAPP_PHONE_NUMBER_ID',

@@ -17,6 +17,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
+ReadWritePaths=/var/www/ncut-app/uploads
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

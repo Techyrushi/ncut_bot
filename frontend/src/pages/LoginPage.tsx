@@ -37,33 +37,33 @@ export function LoginPage() {
     <div className="login-page">
       <div className="login-art">
         <div className="brand">
-          <div className="brand-mark">O</div>
+          <img className="brand-logo" src="/ncut_logo.jpeg" alt="N-CUT Abrasives" />
           <div>
-            <strong>orbit</strong>
-            <span>SALES CONSOLE</span>
+            <strong>N-CUT</strong>
+            <span>ABRASIVES SALES</span>
           </div>
         </div>
         <div className="art-copy">
-          <div className="eyebrow">CONVERSATIONS THAT CONVERT</div>
+          <div className="eyebrow">N-CUT ABRASIVES · SALES DESK</div>
           <h1>
-            Turn every
+            Quality abrasives,
             <br />
-            conversation into
+            helpful service,
             <br />
-            <em>momentum.</em>
+            <em>one conversation.</em>
           </h1>
-          <p>One place to manage your catalogue, customers, and sales pipeline.</p>
+          <p>Manage your abrasive catalogue, customer enquiries, and sales follow-ups in one place.</p>
         </div>
         <div className="art-stamp">
-          META
+          N-CUT
           <br />
-          CLOUD API
+          ABRASIVES
         </div>
       </div>
       <form className="login-card" onSubmit={submit}>
         <div className="eyebrow">WELCOME BACK</div>
-        <h2>Sign in to Orbit</h2>
-        <p className="muted">Use your workspace credentials to continue.</p>
+        <h2>Sign in to N-CUT Abrasives</h2>
+        <p className="muted">Use your N-CUT sales workspace credentials to continue.</p>
         <label>
           Email address
           <input

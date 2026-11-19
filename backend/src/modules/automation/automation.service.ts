@@ -10,20 +10,14 @@ import { DEFAULT_WELCOME_MESSAGE, WorkspaceSettings } from '../../database/model
 import { whatsappService } from '../whatsapp/whatsapp.service';
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const PRODUCT_CATEGORIES = [
-  'Flap Disc',
-  'Velcro Disc',
-  'PSA Disc',
-  'Fiber Disc',
-  'Quick Change Disc',
-  'Mop Wheel',
-  'Non-Woven Disc',
-  'Non-Woven Wheel',
-  'Cutting Wheel',
-  'DC / Grinding Wheel',
-  'Hand Pad',
-  'Backup Pad',
-];
+const PRODUCT_CATALOGUE_IMAGE_URL = new URL(
+  '/N-CUT%20Abrasives%20Product%20Catalogue%20.png',
+  env.FRONTEND_URL,
+).toString();
+const PRODUCT_CATEGORY_TITLES: Record<string, string> = {
+  'Velcro & PSA Backup Pads': 'Velcro & PSA Backup',
+  'DC Wheel (Grinding Wheel)': 'DC Grinding Wheel',
+};
 
 type IncomingMessage = {
   id: string;
@@ -64,9 +58,16 @@ export class AutomationService {
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
     const receivedAt = new Date(Number(message.timestamp) * 1000);
-    let conversation = await Conversation.findOne({ customerId: customer._id }).sort({ updatedAt: -1 });
+    let conversation = await Conversation.findOne({
+      customerId: customer._id,
+      status: { $in: ['OPEN', 'HUMAN_HANDOVER'] },
+    }).sort({ updatedAt: -1 });
+    if (!conversation) conversation = await Conversation.findOne({ customerId: customer._id }).sort({ updatedAt: -1 });
     if (conversation?.status === 'HUMAN_HANDOVER') {
       await this.saveInbound(message, customer._id, conversation._id, receivedAt);
+      conversation.lastMessageAt = receivedAt;
+      conversation.lastInteractionAt = receivedAt;
+      await conversation.save();
       if (/^(stop|unsubscribe|opt out)$/i.test(message.text?.body?.trim() ?? '')) {
         customer.optInStatus = 'OPTED_OUT';
         await customer.save();
@@ -84,9 +85,24 @@ export class AutomationService {
     ) {
       conversation.status = 'CLOSED';
       await conversation.save();
-      conversation = null;
     }
-    if (conversation?.status === 'CLOSED' || !conversation) {
+    if (conversation?.status === 'CLOSED') {
+      conversation = await Conversation.findOneAndUpdate(
+        { _id: conversation._id, status: 'CLOSED' },
+        {
+          $set: { status: 'OPEN', currentStep: 'NEW', selectedProductIds: [], uniqueProductCount: 0 },
+          $unset: {
+            interestTriggeredAt: 1,
+            interestPromptStatus: 1,
+            interestPromptLockedAt: 1,
+            currentCategory: 1,
+            handoverAt: 1,
+          },
+        },
+        { new: true, runValidators: true },
+      );
+    }
+    if (!conversation) {
       conversation = await Conversation.findOneAndUpdate(
         { customerId: customer._id, status: 'OPEN' },
         { $setOnInsert: { customerId: customer._id, status: 'OPEN', currentStep: 'NEW' } },
@@ -196,7 +212,7 @@ export class AutomationService {
     to: string,
   ): Promise<void> {
     if (id === 'explore_products') {
-      await this.sendCategories(customerId, conversation._id, to);
+      await this.sendProducts(undefined, customerId, conversation._id, to, 0);
       return;
     }
     if (id.startsWith('category_page:')) {
@@ -213,9 +229,10 @@ export class AutomationService {
       return;
     }
     if (id.startsWith('product_page:')) {
-      const [, category, page] = id.split(':');
-      if (category)
-        await this.sendProducts(decodeURIComponent(category), customerId, conversation._id, to, Number(page) || 0);
+      const parts = id.split(':');
+      const page = Number(parts.at(-1)) || 0;
+      const category = parts.length > 2 ? decodeURIComponent(parts.slice(1, -1).join(':')) : undefined;
+      await this.sendProducts(category, customerId, conversation._id, to, page);
       return;
     }
     if (id.startsWith('product:')) {
@@ -223,7 +240,7 @@ export class AutomationService {
       return;
     }
     if (id === 'another_product') {
-      await this.sendCategories(customerId, conversation._id, to);
+      await this.sendProducts(undefined, customerId, conversation._id, to, 0);
       return;
     }
     const body = 'Sorry, I could not match that selection. Please choose an option.';
@@ -241,16 +258,20 @@ export class AutomationService {
     to: string,
     page = 0,
   ): Promise<void> {
-    const categories = await Product.distinct('category', { isActive: true });
-    const allCategories = [...new Set([...PRODUCT_CATEGORIES, ...categories])];
+    const allCategories = await Product.distinct('category', { isActive: true });
     const start = Math.max(0, page) * 9;
     const rows = allCategories.slice(start, start + 9).map((category) => ({
       id: `category:${encodeURIComponent(category)}`,
-      title: category,
+      title: (PRODUCT_CATEGORY_TITLES[category] ?? category).slice(0, 24),
     }));
     if (start + 9 < allCategories.length) rows.push({ id: `category_page:${page + 1}`, title: 'More Categories' });
     await Conversation.updateOne({ _id: conversationId }, { $set: { currentStep: 'PRODUCT_MENU' } });
-    await this.sendTracked(customerId, conversationId, 'INTERACTIVE', { categories: rows }, () =>
+    await this.sendTracked(
+      customerId,
+      conversationId,
+      'INTERACTIVE',
+      { text: 'Explore our abrasive and finishing product categories.', categories: rows },
+      () =>
       whatsappService.sendList(to, 'Explore our abrasive and finishing product categories.', 'View categories', [
         { title: 'Product categories', rows },
       ]),
@@ -258,23 +279,24 @@ export class AutomationService {
   }
 
   private async sendProducts(
-    category: string,
+    category: string | undefined,
     customerId: Types.ObjectId,
     conversationId: Types.ObjectId,
     to: string,
     page: number,
   ): Promise<void> {
-    const products = await Product.find({
-      isActive: true,
-      category: new RegExp(`^${category.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
-    })
-      .select('name description')
-      .sort({ name: 1 })
+    const filter: Record<string, unknown> = { isActive: true };
+    if (category) filter.category = new RegExp(`^${category.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
+    const products = await Product.find(filter)
+      .select('name description category')
+      .sort({ category: 1, name: 1 })
       .skip(Math.max(0, page) * 9)
       .limit(10)
       .lean();
     if (products.length === 0) {
-      const body = `There are currently no active products listed in ${category}.`;
+      const body = category
+        ? `There are currently no active products listed in ${category}.`
+        : 'There are currently no active products in the catalogue.';
       await this.sendTracked(customerId, conversationId, 'TEXT', { text: body }, () =>
         whatsappService.sendText(to, body),
       );
@@ -283,18 +305,37 @@ export class AutomationService {
     const rows: Array<{ id: string; title: string; description?: string }> = products.slice(0, 9).map((product) => ({
       id: `product:${product._id}`,
       title: product.name.slice(0, 24),
-      description: `${product.name}: ${product.description}`,
+      description: `${product.category} · ${product.description}`.slice(0, 72),
     }));
     if (products.length > 9)
-      rows.push({ id: `product_page:${encodeURIComponent(category)}:${page + 1}`, title: 'More Products' });
-    const body = `Select a ${category} product to see its details.`;
+      rows.push({
+        id: category
+          ? `product_page:${encodeURIComponent(category)}:${page + 1}`
+          : `product_page:${page + 1}`,
+        title: 'More Products',
+      });
+    const body = category
+      ? `Select a ${category} product below to receive its photo, description, and specifications.`
+      : 'See the catalogue image above, then choose a product below to receive its photo, description, and specifications.';
     await Conversation.updateOne({ _id: conversationId }, { $set: { currentStep: 'PRODUCT_MENU' } });
+    if (page === 0) {
+      await this.sendTracked(customerId, conversationId, 'IMAGE', { imageUrl: PRODUCT_CATALOGUE_IMAGE_URL }, () =>
+        whatsappService.sendImage(to, PRODUCT_CATALOGUE_IMAGE_URL),
+      );
+    }
     await this.sendTracked(
       customerId,
       conversationId,
       'INTERACTIVE',
-      { category, products: products.map(({ _id, name }) => ({ id: _id, name })) },
-      () => whatsappService.sendList(to, body, 'View products', [{ title: category.slice(0, 24), rows }]),
+      {
+        text: body,
+        ...(category ? { category } : {}),
+        products: products.map(({ _id, name, category }) => ({ id: _id, name, category })),
+      },
+      () =>
+        whatsappService.sendList(to, body, 'View products', [
+          { title: category ? (PRODUCT_CATEGORY_TITLES[category] ?? category).slice(0, 24) : 'Available products', rows },
+        ]),
     );
   }
 
@@ -394,7 +435,7 @@ export class AutomationService {
             customerId,
             conversation._id,
             'INTERACTIVE',
-            { type: 'third-product-interest-trigger' },
+            { text: body, type: 'third-product-interest-trigger' },
             () => whatsappService.sendButtons(to, body, [{ id: 'connect_sales', title: 'Connect With Team' }]),
           );
           await Conversation.updateOne(

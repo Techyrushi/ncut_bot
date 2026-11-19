@@ -9,6 +9,7 @@
 - Deploy backend and frontend separately behind HTTPS. Set CORS to the exact dashboard origin.
 - Set up a Meta system-user token, approved templates, business verification, webhook callback, and production phone number.
 - Enter verified products and confirm images are publicly fetchable by Meta.
+- Set `APP_URL` to the public HTTPS API origin and persist the backend `uploads` directory. Docker Compose mounts it at `/app/uploads`; for a host-based deployment, create `/var/www/ncut-app/uploads` and grant write access to `ncut-app`.
 
 ## Runtime
 
@@ -27,6 +28,8 @@ Build the frontend with its API URL configured at build time:
 ```sh
 VITE_API_URL=https://ncut-api.ssdit.in/api/v1 npm run build -w frontend
 ```
+
+Without an explicit `VITE_API_URL`, production builds use the configured public API origin; local Vite development uses `http://localhost:5000/api/v1`.
 
 Use an external process supervisor/container orchestrator with health checks on `/api/v1/health`, graceful termination, resource limits, rolling deployment, and an operator-managed single webhook worker until queue leases/recovery are implemented. The app expects the proxy to preserve `X-Hub-Signature-256` and the original request body.
 

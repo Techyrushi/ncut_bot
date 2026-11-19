@@ -9,6 +9,7 @@ import { Lead } from '../src/database/models/lead.model';
 import { Message } from '../src/database/models/message.model';
 import { Product } from '../src/database/models/product.model';
 import { WebhookEvent } from '../src/database/models/webhook-event.model';
+import { env } from '../src/config/env';
 import { automationService } from '../src/modules/automation/automation.service';
 import { processPendingWebhookEvents, verifySignature } from '../src/modules/webhook/webhook.processor';
 import { whatsappService } from '../src/modules/whatsapp/whatsapp.service';
@@ -192,6 +193,80 @@ describe('Meta Cloud API service', () => {
 });
 
 describe('catalogue automation', () => {
+  it('lists active catalogue products directly and sends selected image and specifications', async () => {
+    let counter = 0;
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      return new Response(JSON.stringify({ messages: [{ id: `wamid.catalogue.${++counter}` }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const product = await Product.create({
+      name: 'Custom-category flap disc',
+      slug: 'custom-category-flap-disc',
+      description: 'For verified metal finishing',
+      category: 'Custom Abrasives',
+      imageUrl: 'https://cdn.example.test/flap-disc.jpg',
+      sizes: ['4"', '5"'],
+      grits: ['60', '80'],
+      backing: ['Fiber'],
+      specifications: { Material: 'Zirconia' },
+    });
+    const inbound = (id: string, selection?: string) => ({
+      id,
+      from: '15550001010',
+      timestamp: String(Math.floor(Date.now() / 1000)),
+      type: selection ? 'interactive' : 'text',
+      ...(selection
+        ? { interactive: { button_reply: { id: selection, title: selection } } }
+        : { text: { body: 'Hello' } }),
+    });
+
+    await automationService.processIncoming(inbound('msg-welcome'));
+    await automationService.processIncoming(inbound('msg-product-menu', 'explore_products'));
+    const catalogueImageUrl = new URL('/N-CUT%20Abrasives%20Product%20Catalogue%20.png', env.FRONTEND_URL).toString();
+    const menuImagePayload = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    const menuPayload = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body)) as {
+      interactive: {
+        body: { text: string };
+        action: { sections: Array<{ rows: Array<{ id: string; description?: string }> }> };
+      };
+    };
+    expect(menuImagePayload).toMatchObject({
+      type: 'image',
+      image: { link: catalogueImageUrl },
+    });
+    expect(menuPayload.interactive.body.text).toBe(
+      'See the catalogue image above, then choose a product below to receive its photo, description, and specifications.',
+    );
+    const productRow = menuPayload.interactive.action.sections[0]?.rows[0];
+    expect(productRow).toMatchObject({
+      id: `product:${product.id}`,
+      description: expect.stringContaining('Custom Abrasives'),
+    });
+
+    await automationService.processIncoming(inbound('msg-product-selected', `product:${product.id}`));
+    const sentPayloads = fetchMock.mock.calls.map(([, options]) => JSON.parse(String(options?.body)));
+    expect(sentPayloads.map((payload) => payload.type)).toEqual([
+      'interactive',
+      'image',
+      'interactive',
+      'image',
+      'text',
+      'interactive',
+    ]);
+    expect(sentPayloads[3]).toMatchObject({ image: { link: product.imageUrl } });
+    const messages = await Message.find({ direction: 'OUTBOUND' }).lean();
+    expect(messages.some((message) => message.messageType === 'IMAGE' && message.content.imageUrl === product.imageUrl))
+      .toBe(true);
+    const details = messages.find(
+      (message) => message.messageType === 'TEXT' && message.content.productId?.toString() === product.id,
+    );
+    expect(details?.content.text).toContain('Material: Zirconia');
+    expect(details?.content.text).toContain('Sizes: 4", 5"');
+    expect(details?.content.text).toContain('Grits: 60, 80');
+  });
+
   it('handles Meta business-scoped sender IDs when phone numbers are omitted', async () => {
     const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ messages: [{ id: 'wamid.bsuid.outbound' }] }), {
@@ -261,6 +336,36 @@ describe('catalogue automation', () => {
     expect(await Lead.countDocuments({ conversationId: conversation?._id })).toBe(1);
   });
 
+  it('keeps handover messages with sales while refreshing conversation activity', async () => {
+    const customer = await Customer.create({ whatsappId: '15550003334', phoneNumber: '15550003334' });
+    const previousActivity = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const conversation = await Conversation.create({
+      customerId: customer._id,
+      status: 'HUMAN_HANDOVER',
+      currentStep: 'HUMAN_HANDOVER',
+      lastMessageAt: previousActivity,
+      lastInteractionAt: previousActivity,
+    });
+    const fetchMock = jest.spyOn(global, 'fetch');
+    const receivedAt = new Date(Math.floor(Date.now() / 1000) * 1000);
+
+    await automationService.processIncoming({
+      id: 'msg-during-handover',
+      from: customer.whatsappId,
+      timestamp: String(receivedAt.getTime() / 1000),
+      type: 'text',
+      text: { body: 'I have another question' },
+    });
+
+    const updatedConversation = await Conversation.findById(conversation._id);
+    expect(updatedConversation?.status).toBe('HUMAN_HANDOVER');
+    expect(updatedConversation?.lastMessageAt).toEqual(receivedAt);
+    expect(updatedConversation?.lastInteractionAt).toEqual(receivedAt);
+    expect(await Message.countDocuments({ conversationId: conversation._id, direction: 'INBOUND' })).toBe(1);
+    expect(await Message.countDocuments({ conversationId: conversation._id, direction: 'OUTBOUND' })).toBe(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('records an opt-out and stops subsequent automation', async () => {
     fakeMetaSend();
     await automationService.processIncoming({
@@ -278,7 +383,7 @@ describe('catalogue automation', () => {
   it('expires stale sessions and starts a fresh conversation', async () => {
     fakeMetaSend();
     const customer = await Customer.create({ whatsappId: '15550006666', phoneNumber: '15550006666' });
-    await Conversation.create({
+    const previousConversation = await Conversation.create({
       customerId: customer._id,
       status: 'OPEN',
       currentStep: 'PRODUCT_DETAILS',
@@ -293,10 +398,11 @@ describe('catalogue automation', () => {
       text: { body: 'Hello again' },
     });
     const conversations = await Conversation.find({ customerId: customer._id }).sort({ createdAt: 1 });
-    expect(conversations).toHaveLength(2);
-    expect(conversations[0]?.status).toBe('CLOSED');
-    expect(conversations[1]?.uniqueProductCount).toBe(0);
-    expect(conversations[1]?.currentStep).toBe('WELCOME_SENT');
+    expect(conversations).toHaveLength(1);
+    expect(conversations[0]?.id).toBe(previousConversation.id);
+    expect(conversations[0]?.status).toBe('OPEN');
+    expect(conversations[0]?.uniqueProductCount).toBe(0);
+    expect(conversations[0]?.currentStep).toBe('WELCOME_SENT');
   });
 
   it('handles invalid product identifiers without counting an interest', async () => {

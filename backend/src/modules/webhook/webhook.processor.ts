@@ -1,6 +1,7 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { env } from '../../config/env';
 import { logger } from '../../config/logger';
+import { recordSystemActivity } from '../logs/activity-log';
 import { WebhookEvent } from '../../database/models/webhook-event.model';
 import { Message } from '../../database/models/message.model';
 import { automationService } from '../automation/automation.service';
@@ -147,7 +148,11 @@ export async function processPendingWebhookEvents(batchSize = 25): Promise<void>
         },
       );
       logger.error({ err: error, eventId: event.eventId, attempts: event.attempts }, 'Webhook event processing failed');
-      if (!exhausted) return;
+      if (exhausted) {
+        await recordSystemActivity('WEBHOOK_PROCESSING_FAILED', 'A WhatsApp webhook event exhausted its retry limit');
+      } else {
+        return;
+      }
     }
   }
 }

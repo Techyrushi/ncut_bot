@@ -13,6 +13,14 @@ export const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
     return;
   }
 
+  if (error?.type === 'entity.too.large') {
+    res.status(413).json({
+      success: false,
+      error: { code: 'PAYLOAD_TOO_LARGE', message: 'Request body exceeds the allowed size' },
+    });
+    return;
+  }
+
   if (error?.code === 11000) {
     res.status(409).json({ success: false, error: { code: 'DUPLICATE_RESOURCE', message: 'Resource already exists' } });
     return;

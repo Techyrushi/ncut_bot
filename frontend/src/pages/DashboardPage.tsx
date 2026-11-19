@@ -1,17 +1,20 @@
 import { useQuery } from '@tanstack/react-query';
+import { Link } from 'react-router-dom';
 import { api } from '../services/api';
 import type { ApiResponse, DashboardStats } from '../types/api';
 
-const metrics: Array<{ key: keyof DashboardStats; label: string; note: string; accent: string }> = [
-  { key: 'totalCustomers', label: 'Total customers', note: 'Opt-in audience', accent: 'lavender' },
-  { key: 'totalConversations', label: 'Conversations', note: 'All-time activity', accent: 'blue' },
-  { key: 'totalProductSelections', label: 'Product selections', note: 'Unique interests', accent: 'orange' },
-  { key: 'totalLeads', label: 'Sales leads', note: 'Created from handovers', accent: 'green' },
-  { key: 'pendingLeads', label: 'Pending leads', note: 'Awaiting first contact', accent: 'yellow' },
-  { key: 'humanHandovers', label: 'Human handovers', note: 'Active sales conversations', accent: 'pink' },
+const metrics: Array<{ key: keyof DashboardStats; label: string; note: string; accent: string; icon: string }> = [
+  { key: 'totalCustomers', label: 'Total customers', note: 'Customer directory', accent: 'lavender', icon: '◎' },
+  { key: 'totalConversations', label: 'Conversations', note: 'N-CUT customer enquiries', accent: 'blue', icon: '◌' },
+  { key: 'totalProductSelections', label: 'Product selections', note: 'Unique interests', accent: 'orange', icon: '▧' },
+  { key: 'totalLeads', label: 'Sales leads', note: 'Created from handovers', accent: 'green', icon: '↗' },
+  { key: 'pendingLeads', label: 'Pending leads', note: 'Awaiting first contact', accent: 'yellow', icon: '◷' },
+  { key: 'humanHandovers', label: 'Human handovers', note: 'Active sales conversations', accent: 'pink', icon: '↔' },
 ];
 
 export function DashboardPage() {
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
   const query = useQuery({
     queryKey: ['dashboard-stats'],
     queryFn: async () => (await api.get<ApiResponse<DashboardStats>>('/dashboard/stats')).data.data,
@@ -30,17 +33,17 @@ export function DashboardPage() {
   });
   return (
     <div className="page-stack">
-      <div className="page-heading">
-        <div>
+      <section className="dashboard-welcome">
+        <div className="dashboard-welcome-copy">
           <div className="eyebrow">
             {new Date()
               .toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
               .toUpperCase()}
           </div>
-          <h1>Good afternoon.</h1>
-          <p>Here’s what’s happening across your WhatsApp sales channel.</p>
+          <h1>{greeting}.</h1>
+          <p>N-CUT Abrasives catalogue enquiries and sales activity at a glance.</p>
         </div>
-        <div className="heading-actions">
+        <div className="dashboard-welcome-actions">
           <span className={`status-pill ${health.data?.status !== 'ok' ? 'warning' : ''}`}>
             <i />
             {health.data?.status === 'ok'
@@ -49,29 +52,30 @@ export function DashboardPage() {
                 ? 'Database unavailable'
                 : 'Checking system'}
           </span>
+          <div className="dashboard-quick-links">
+            <Link to="/conversations" className="secondary-button">
+              Open customer inbox <span aria-hidden="true">→</span>
+            </Link>
+            <Link to="/products" className="primary-button">
+              Manage products <span>→</span>
+            </Link>
+          </div>
         </div>
-      </div>
+      </section>
       {query.isError && (
         <div className="alert error">
           {query.error instanceof Error ? query.error.message : 'Unable to load dashboard metrics.'}
         </div>
       )}
       <section className="metric-grid">
-        {metrics.map((metric, index) => (
+        {metrics.map((metric) => (
           <article className={`metric-card ${metric.accent}`} key={metric.key}>
             <div className="metric-top">
               <span className="metric-label">{metric.label}</span>
-              <span className="metric-ordinal">{String(index + 1).padStart(2, '0')}</span>
+              <span className="metric-icon">{metric.icon}</span>
             </div>
             <strong className="metric-value">{query.isLoading ? '—' : (query.data?.[metric.key] ?? 0)}</strong>
             <span className="metric-note">{metric.note}</span>
-            <div className="metric-graph">
-              <i style={{ height: `${26 + ((index * 17) % 40)}%` }} />
-              <i style={{ height: `${44 + ((index * 11) % 38)}%` }} />
-              <i style={{ height: `${32 + ((index * 19) % 45)}%` }} />
-              <i style={{ height: `${57 + ((index * 7) % 30)}%` }} />
-              <i style={{ height: `${41 + ((index * 13) % 45)}%` }} />
-            </div>
           </article>
         ))}
       </section>
@@ -100,15 +104,11 @@ export function DashboardPage() {
             </div>
             <strong>{query.data?.humanHandovers ?? '—'}</strong>
           </div>
-          <div className="panel-foot">Assign leads promptly to keep customer conversations moving.</div>
+          <div className="panel-foot">Assign N-CUT customer enquiries promptly to keep conversations moving.</div>
         </article>
         <article className="panel readiness-panel">
           <div className="eyebrow">CHANNEL CONFIGURATION</div>
-          <h2>
-            Your catalogue,
-            <br />
-            always within reach.
-          </h2>
+          <h2>N-CUT WhatsApp channel</h2>
           <p>
             Credential presence is checked here; message delivery and webhook subscription must still be verified with
             Meta.
@@ -128,8 +128,8 @@ export function DashboardPage() {
         </article>
       </section>
       <div className="dashboard-bottom">
-        <span>ORBIT SALES CONSOLE</span>
-        <span>METRICS REFRESH ON PAGE LOAD</span>
+        <span>N-CUT ABRASIVES · SALES OVERVIEW</span>
+        <span>Metrics refresh automatically every 30 seconds</span>
       </div>
     </div>
   );

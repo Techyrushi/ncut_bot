@@ -15,15 +15,20 @@ customersRouter.get(
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
     const search = typeof req.query.search === 'string' ? req.query.search.trim() : '';
-    const filter = search
-      ? {
+    const optInStatus = z.enum(['UNKNOWN', 'OPTED_IN', 'OPTED_OUT']).optional().parse(req.query.optInStatus);
+    const filter = {
+      ...(optInStatus ? { optInStatus } : {}),
+      ...(search
+        ? {
           $or: [
             { phoneNumber: { $regex: search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
+            { whatsappId: { $regex: search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
             { name: { $regex: search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
             { profileName: { $regex: search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } },
           ],
         }
-      : {};
+        : {}),
+    };
     const [items, total] = await Promise.all([
       Customer.find(filter)
         .sort({ updatedAt: -1 })

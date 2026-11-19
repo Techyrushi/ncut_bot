@@ -1,3 +1,4 @@
+import { ActivityLog } from './activity-log.model';
 import { Conversation } from './conversation.model';
 import { Customer } from './customer.model';
 import { Lead } from './lead.model';
@@ -10,6 +11,7 @@ import { WebhookEvent } from './webhook-event.model';
 import { WorkspaceSettings } from './workspace-settings.model';
 
 const models = [
+  ActivityLog,
   Conversation,
   Customer,
   Lead,

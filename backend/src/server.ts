@@ -6,10 +6,12 @@ import mongoose from 'mongoose';
 import type { Server } from 'node:http';
 import { startWebhookWorker } from './modules/webhook/webhook.processor';
 import { initializeAdminUser } from './modules/auth/bootstrap';
+import { recordSystemActivity } from './modules/logs/activity-log';
 
 async function start(): Promise<void> {
   await connectDatabase();
   await initializeAdminUser();
+  await recordSystemActivity('API_STARTED', 'Backend connected to the database and started');
   const worker = startWebhookWorker();
   worker.unref();
   const server = app.listen(env.PORT, env.HOST, () =>
@@ -25,14 +27,16 @@ function registerShutdown(server: Server, worker: NodeJS.Timeout): void {
     shuttingDown = true;
     logger.info({ signal }, 'Graceful shutdown started');
     clearInterval(worker);
-    server.close((error) => {
-      if (error) {
-        logger.error({ err: error }, 'HTTP server shutdown failed');
-        process.exitCode = 1;
-      }
-      void mongoose.disconnect().catch((disconnectError: unknown) => {
-        logger.error({ err: disconnectError }, 'MongoDB shutdown failed');
-        process.exitCode = 1;
+    void recordSystemActivity('API_STOPPED', `Backend shutdown requested (${signal})`).finally(() => {
+      server.close((error) => {
+        if (error) {
+          logger.error({ err: error }, 'HTTP server shutdown failed');
+          process.exitCode = 1;
+        }
+        void mongoose.disconnect().catch((disconnectError: unknown) => {
+          logger.error({ err: disconnectError }, 'MongoDB shutdown failed');
+          process.exitCode = 1;
+        });
       });
     });
   };

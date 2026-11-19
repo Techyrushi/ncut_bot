@@ -1,10 +1,18 @@
 import { useEffect, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { QRCodeSVG } from 'qrcode.react';
+import { QRCodeCanvas } from 'qrcode.react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../services/api';
 import type { ApiResponse } from '../types/api';
 import { useAuth } from '../contexts/AuthContext';
+
+const BUSINESS_PHONE_NUMBER = '+919175731328';
+
+function normalizeInternationalNumber(value: string): string {
+  const formatted = value.trim().replace(/[\s().-]/g, '');
+  if (!formatted) return '';
+  return formatted.startsWith('+') ? formatted : `+${formatted}`;
+}
 
 export function UtilityPage({ title, eyebrow, description }: { title: string; eyebrow: string; description: string }) {
   return (
@@ -46,7 +54,7 @@ export function AutomationSettingsPage() {
           ['Welcome', 'A first inbound message starts the saved welcome message and product/team options.'],
           [
             'Catalogue',
-            '12 requested categories are paginated; product content is read from active catalogue records.',
+            'Active N-CUT products are paginated directly; selecting a product sends its saved image and verified specifications.',
           ],
           [
             'Interest trigger',
@@ -75,8 +83,8 @@ export function AutomationSettingsPage() {
           </div>
         ))}
         <p className="small muted">
-          Welcome wording and the click-to-chat business number are editable in WhatsApp setup. The policy and trigger
-          rules are intentionally fixed in code to preserve the approved workflow.
+          Welcome wording is editable in WhatsApp setup. The business number, policy, and trigger rules are fixed to
+          preserve the approved workspace configuration.
         </p>
       </section>
     </div>
@@ -85,14 +93,17 @@ export function AutomationSettingsPage() {
 
 export function WhatsAppSetupPage() {
   const { user } = useAuth();
-  const [number, setNumber] = useState('');
+  const number = BUSINESS_PHONE_NUMBER;
   const [message, setMessage] = useState('Hello, I would like to explore your products.');
   const [welcomeMessage, setWelcomeMessage] = useState(
     '👋 Thank you for connecting with us!\n\nExplore our range of abrasive and finishing products.',
   );
-  const digits = number.replace(/\D/g, '');
+  const [qrDownloadError, setQrDownloadError] = useState('');
+  const normalizedNumber = normalizeInternationalNumber(number);
+  const digits = normalizedNumber.replace(/^\+/, '');
+  const phoneIsValid = /^\+[1-9]\d{6,14}$/.test(normalizedNumber);
   const prefilledMessage = message.trim();
-  const chatUrl = digits
+  const chatUrl = phoneIsValid
     ? `https://wa.me/${digits}${prefilledMessage ? `?text=${encodeURIComponent(prefilledMessage)}` : ''}`
     : '';
   const queryClient = useQueryClient();
@@ -136,25 +147,36 @@ export function WhatsAppSetupPage() {
       ).data.data,
   });
   const saveSettings = useMutation({
-    mutationFn: async () => api.patch('/settings/workspace', { businessPhoneNumber: number, welcomeMessage }),
+    mutationFn: async () =>
+      api.patch('/settings/workspace', { businessPhoneNumber: normalizedNumber, welcomeMessage }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ['workspace-settings'] });
     },
   });
   function downloadQr(): void {
-    const svg = document.getElementById('whatsapp-qr');
-    if (!(svg instanceof SVGSVGElement)) return;
-    const blob = new Blob([svg.outerHTML], { type: 'image/svg+xml;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = 'whatsapp-catalogue-qr.svg';
-    anchor.click();
-    URL.revokeObjectURL(url);
+    const canvas = document.getElementById('whatsapp-qr');
+    if (!(canvas instanceof HTMLCanvasElement)) {
+      setQrDownloadError('The QR image is not ready yet. Please try again.');
+      return;
+    }
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        setQrDownloadError('Unable to create the QR image. Please try again.');
+        return;
+      }
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `whatsapp-catalogue-${digits}.png`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setQrDownloadError('');
+    }, 'image/png');
   }
   useEffect(() => {
     if (settings.data) {
-      setNumber(settings.data.businessPhoneNumber);
       setWelcomeMessage(settings.data.welcomeMessage);
     }
   }, [settings.data]);
@@ -251,19 +273,20 @@ export function WhatsAppSetupPage() {
           <label>
             Business phone number
             <input
-              disabled={user?.role !== 'ADMIN'}
+              type="tel"
+              readOnly
               value={number}
-              onChange={(e) => setNumber(e.target.value)}
-              placeholder="+15551234567"
               inputMode="tel"
+              autoComplete="tel"
+              aria-describedby="business-phone-hint"
             />
           </label>
           <label>
             QR prefilled message
             <textarea value={message} onChange={(e) => setMessage(e.target.value)} />
           </label>
-          <div className="small muted">
-            Use international format. The QR does not itself constitute customer opt-in.
+          <div className="small muted" id="business-phone-hint">
+            This business number is fixed. The QR does not itself constitute customer opt-in.
           </div>
           <div className="section-rule" />
           <div className="eyebrow">AUTOMATION / WELCOME</div>
@@ -276,7 +299,11 @@ export function WhatsAppSetupPage() {
             />
           </label>
           {user?.role === 'ADMIN' && (
-            <button className="primary-button" disabled={saveSettings.isPending} onClick={() => saveSettings.mutate()}>
+            <button
+              className="primary-button"
+              disabled={saveSettings.isPending}
+              onClick={() => saveSettings.mutate()}
+            >
               {saveSettings.isPending ? 'Saving…' : 'Save workspace settings'} <span>→</span>
             </button>
           )}
@@ -291,7 +318,21 @@ export function WhatsAppSetupPage() {
           <div className="eyebrow">LIVE PREVIEW</div>
           <div className="qr-box">
             {chatUrl ? (
-              <QRCodeSVG id="whatsapp-qr" value={chatUrl} size={210} level="M" />
+              <QRCodeCanvas
+                id="whatsapp-qr"
+                value={chatUrl}
+                size={240}
+                level="M"
+                includeMargin
+                bgColor="#ffffff"
+                fgColor="#111827"
+              />
+            ) : number.trim() ? (
+              <div className="qr-empty">
+                Enter a valid international
+                <br />
+                number to generate your QR
+              </div>
             ) : (
               <div className="qr-empty">
                 Enter a number
@@ -303,9 +344,14 @@ export function WhatsAppSetupPage() {
           <strong>Scan to chat</strong>
           <span className="muted">Your catalogue starts in WhatsApp</span>
           {chatUrl && (
-            <button className="primary-button download-link" onClick={downloadQr}>
-              ↓ Download QR
+            <button type="button" className="primary-button download-link" onClick={downloadQr}>
+              ↓ Download QR as PNG
             </button>
+          )}
+          {qrDownloadError && (
+            <span className="small danger-text" role="alert">
+              {qrDownloadError}
+            </span>
           )}
         </section>
       </div>

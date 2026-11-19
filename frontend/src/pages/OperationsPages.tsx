@@ -1,5 +1,6 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import type { ApiResponse, PageResult } from '../types/api';
 import { useAuth } from '../contexts/AuthContext';
@@ -372,14 +373,35 @@ export function LeadsPage() {
 }
 
 export function ConversationsPage() {
-  const [selectedId, setSelectedId] = useState('');
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedId = searchParams.get('conversation') ?? '';
   const [reply, setReply] = useState('');
   const [templateId, setTemplateId] = useState('');
   const [templateComponents, setTemplateComponents] = useState('[]');
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [attachment, setAttachment] = useState<File>();
+  const [attachmentPreview, setAttachmentPreview] = useState('');
+  const [attachmentError, setAttachmentError] = useState('');
+  const lastReadRequest = useRef('');
   const client = useQueryClient();
+  const messageEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!attachmentPreview.startsWith('blob:')) return;
+    return () => URL.revokeObjectURL(attachmentPreview);
+  }, [attachmentPreview]);
+  useEffect(() => {
+    setReply('');
+    setAttachment(undefined);
+    setAttachmentPreview('');
+    setAttachmentError('');
+    setShowEmojiPicker(false);
+  }, [selectedId]);
+
   const conversations = useQuery({
     queryKey: ['conversations'],
-    queryFn: async () => (await api.get<ApiResponse<PageResult<BasicRecord>>>('/conversations')).data.data.items,
+    queryFn: async () =>
+      (await api.get<ApiResponse<PageResult<BasicRecord>>>('/conversations?limit=100')).data.data.items,
     refetchInterval: 5000,
     refetchOnWindowFocus: true,
   });
@@ -388,7 +410,7 @@ export function ConversationsPage() {
     enabled: Boolean(selectedId),
     queryFn: async () =>
       (await api.get<ApiResponse<Array<BasicRecord>>>(`/conversations/${selectedId}/messages`)).data.data,
-    refetchInterval: 3000,
+    refetchInterval: selectedId ? 3000 : false,
     refetchOnWindowFocus: true,
   });
   const approvedTemplates = useQuery({
@@ -403,26 +425,89 @@ export function ConversationsPage() {
   const lastInteraction = selected?.lastInteractionAt ? new Date(String(selected.lastInteractionAt)).getTime() : 0;
   const serviceWindowOpen = lastInteraction > Date.now() - 24 * 60 * 60 * 1000;
   useEffect(() => {
-    if (!selectedId && conversations.data?.length) setSelectedId(conversations.data[0]!._id);
-  }, [conversations.data, selectedId]);
+    messageEndRef.current?.scrollIntoView({ block: 'end', behavior: 'smooth' });
+  }, [messages.data, selectedId]);
+  const markRead = useMutation({
+    mutationFn: async () => api.post(`/conversations/${selectedId}/read`),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['conversations'] }),
+        client.invalidateQueries({ queryKey: ['conversation-messages', selectedId] }),
+      ]);
+    },
+  });
+  useEffect(() => {
+    if (!selectedId || Number(selected?.unreadCount ?? 0) === 0) {
+      lastReadRequest.current = '';
+      return;
+    }
+    if (!markRead.isPending && lastReadRequest.current !== selectedId) {
+      lastReadRequest.current = selectedId;
+      markRead.mutate();
+    }
+  }, [selectedId, selected?.unreadCount, markRead.isPending]);
   const closeConversation = useMutation({
     mutationFn: async () => api.patch(`/conversations/${selectedId}/status`, { status: 'CLOSED' }),
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: ['conversations'] });
     },
   });
+  const resumeAutomation = useMutation({
+    mutationFn: async () => api.post(`/conversations/${selectedId}/resume-automation`),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['conversations'] }),
+        client.invalidateQueries({ queryKey: ['conversation-messages', selectedId] }),
+      ]);
+    },
+  });
   const sendReply = useMutation({
     mutationFn: async () => {
       const customerId = getId(selected?.customerId);
       if (!customerId) throw new Error('The selected conversation has no customer record.');
+      if (attachment) {
+        const upload = await api.post<ApiResponse<{ imageUrl: string }>>('/products/image-upload', attachment, {
+          headers: { 'Content-Type': attachment.type },
+        });
+        return api.post('/whatsapp/send-image', {
+          customerId,
+          imageUrl: upload.data.data.imageUrl,
+          caption: reply.trim(),
+        });
+      }
       return api.post('/whatsapp/send-message', { customerId, message: reply.trim() });
+    },
+    onMutate: async () => {
+      await client.cancelQueries({ queryKey: ['conversation-messages', selectedId] });
+      const previous = client.getQueryData<BasicRecord[]>(['conversation-messages', selectedId]);
+      const optimistic: BasicRecord = {
+        _id: `optimistic-${Date.now()}`,
+        direction: 'OUTBOUND',
+        messageType: attachment ? 'IMAGE' : 'TEXT',
+        content: attachment
+          ? { imageUrl: attachmentPreview, caption: reply.trim() }
+          : { text: reply.trim() },
+        status: 'QUEUED',
+        timestamp: new Date().toISOString(),
+      };
+      client.setQueryData<BasicRecord[]>(['conversation-messages', selectedId], (current) => [
+        ...(current ?? []),
+        optimistic,
+      ]);
+      return { previous };
     },
     onSuccess: async () => {
       setReply('');
+      setAttachment(undefined);
+      setAttachmentPreview('');
+      setAttachmentError('');
       await Promise.all([
         client.invalidateQueries({ queryKey: ['conversation-messages', selectedId] }),
         client.invalidateQueries({ queryKey: ['conversations'] }),
       ]);
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previous) client.setQueryData(['conversation-messages', selectedId], context.previous);
     },
   });
   const sendTemplate = useMutation({
@@ -454,20 +539,42 @@ export function ConversationsPage() {
   });
   function submitReply(event: FormEvent): void {
     event.preventDefault();
-    if (reply.trim()) sendReply.mutate();
+    if (reply.trim() || attachment) sendReply.mutate();
   }
+  function chooseAttachment(file?: File): void {
+    if (!file) return;
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setAttachmentError('Only JPEG, PNG, and WebP image attachments are supported.');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setAttachmentError('Image attachments must be 5 MB or smaller.');
+      return;
+    }
+    setAttachmentError('');
+    setAttachment(file);
+    setAttachmentPreview(URL.createObjectURL(file));
+  }
+  function insertEmoji(emoji: string): void {
+    setReply((current) => `${current}${emoji}`);
+    setShowEmojiPicker(false);
+  }
+
   return (
     <div className="page-stack">
       <div className="page-heading">
         <div>
-          <div className="eyebrow">MESSAGING / HISTORY</div>
+          <div className="eyebrow">MESSAGING / INBOX</div>
           <h1>Conversations</h1>
-          <p>Review customer messages and persisted automation state.</p>
+          <p>Reply to customers and follow WhatsApp delivery and read receipts.</p>
         </div>
       </div>
-      <div className="content-grid conversation-grid">
+      <div className={`content-grid conversation-grid ${selectedId ? 'mobile-has-selection' : ''}`}>
         <section className="panel conversation-list">
-          <div className="eyebrow">RECENT THREADS</div>
+          <div className="conversation-list-heading">
+            <div className="eyebrow">RECENT THREADS</div>
+            <span>{conversations.data?.length ?? 0}</span>
+          </div>
           {conversations.isLoading && <div className="empty-row">Loading conversations…</div>}
           {conversations.isError && (
             <div className="alert error">
@@ -478,13 +585,17 @@ export function ConversationsPage() {
             <button
               className={`conversation-entry ${selectedId === conversation._id ? 'selected' : ''}`}
               key={conversation._id}
-              onClick={() => setSelectedId(conversation._id)}
+              onClick={() => setSearchParams({ conversation: conversation._id })}
             >
-              <strong>{display(conversation.customerId)}</strong>
-              <span>
-                {String(conversation.status)} · {String(conversation.currentStep)}
+              <span className="conversation-avatar">{display(conversation.customerId).slice(0, 1).toUpperCase()}</span>
+              <span className="conversation-entry-copy">
+                <strong>{display(conversation.customerId)}</strong>
+                <span>{conversationPreview(conversation)}</span>
+                <small>{formatRelativeDate(conversation.lastMessageAt)}</small>
               </span>
-              <small>{formatDate(conversation.lastMessageAt)}</small>
+              {Number(conversation.unreadCount ?? 0) > 0 && (
+                <span className="conversation-unread">{String(conversation.unreadCount)}</span>
+              )}
             </button>
           ))}
           {!conversations.isLoading && !conversations.isError && conversations.data?.length === 0 && (
@@ -494,15 +605,52 @@ export function ConversationsPage() {
         <section className="panel message-thread">
           <div className="panel-heading">
             <div>
-              <div className="eyebrow">MESSAGE HISTORY</div>
-              <h2>{selected ? display(selected.customerId) : 'Select a thread'}</h2>
+              <button
+                type="button"
+                className="conversation-back"
+                onClick={() => setSearchParams({})}
+                aria-label="Back to conversations"
+              >
+                ←
+              </button>
+              <div>
+                <div className="eyebrow">MESSAGE HISTORY</div>
+                <h2>{selected ? display(selected.customerId) : 'Select a conversation'}</h2>
+                {selected && (
+                  <span className="contact-subtitle">
+                    {customerPhone(selected.customerId)} · {customerActivity(selected.lastInteractionAt)}
+                  </span>
+                )}
+              </div>
             </div>
             {selected && selected.status !== 'CLOSED' && (
-              <button className="text-button" onClick={() => closeConversation.mutate()}>
-                Close conversation
-              </button>
+              <div className="conversation-actions">
+                {selected.status === 'HUMAN_HANDOVER' && (
+                  <button
+                    className="text-button"
+                    onClick={() => resumeAutomation.mutate()}
+                    disabled={resumeAutomation.isPending}
+                  >
+                    {resumeAutomation.isPending ? 'Resuming…' : 'Resume automation'}
+                  </button>
+                )}
+                <button
+                  className="text-button"
+                  onClick={() => closeConversation.mutate()}
+                  disabled={closeConversation.isPending}
+                >
+                  Close conversation
+                </button>
+              </div>
             )}
           </div>
+          {resumeAutomation.isError && (
+            <div className="alert error">
+              {resumeAutomation.error instanceof Error
+                ? resumeAutomation.error.message
+                : 'Unable to resume automation.'}
+            </div>
+          )}
           {!selectedId && <div className="empty-row">Select a conversation to view its messages.</div>}
           {selectedId && messages.isLoading && <div className="empty-row">Loading message history…</div>}
           {messages.isError && (
@@ -510,43 +658,122 @@ export function ConversationsPage() {
               {messages.error instanceof Error ? messages.error.message : 'Unable to load message history.'}
             </div>
           )}
-          {(messages.data ?? []).map((message) => (
-            <article
-              className={`message-bubble ${message.direction === 'OUTBOUND' ? 'outbound' : ''}`}
-              key={message._id}
-            >
-              <div>{messageText(message.content)}</div>
-              <small>
-                {String(message.direction)} · {String(message.status)} · {formatDate(message.timestamp)}
-              </small>
-            </article>
-          ))}
+          {markRead.isError && (
+            <div className="alert error">
+              {markRead.error instanceof Error ? markRead.error.message : 'Unable to mark messages as read.'}
+              <button
+                onClick={() => {
+                  lastReadRequest.current = '';
+                  markRead.mutate();
+                }}
+              >
+                Try again
+              </button>
+            </div>
+          )}
+          {selectedId && (
+            <div className="message-history" aria-live="polite">
+              {selected?.status === 'HUMAN_HANDOVER' && (
+                <div className="alert">
+                  Sales handover is active. New customer messages stay in this inbox; automation remains paused until
+                  you resume it.
+                </div>
+              )}
+              {(messages.data ?? []).map((message) => {
+                const outbound = message.direction === 'OUTBOUND';
+                const imageUrl = messageImageUrl(message.content);
+                return (
+                  <article className={`message-bubble ${outbound ? 'outbound' : ''}`} key={message._id}>
+                    {imageUrl && <img className="message-attachment" src={imageUrl} alt="Shared image" />}
+                    <div>{messageText(message.content)}</div>
+                    <small>
+                      {outbound ? 'You' : display(selected?.customerId)} · {formatDate(message.timestamp)}
+                      {outbound && (
+                        <span className={`message-receipt ${String(message.status).toLowerCase()}`}>
+                          {receiptLabel(message.status)}
+                        </span>
+                      )}
+                    </small>
+                  </article>
+                );
+              })}
+              <div ref={messageEndRef} />
+            </div>
+          )}
           {selected && selected.status !== 'CLOSED' && (
             <section className="message-composer">
               {serviceWindowOpen ? (
                 <form onSubmit={submitReply}>
-                  <label>
-                    Reply to customer
+                  {attachmentPreview && (
+                    <div className="attachment-preview">
+                      <img src={attachmentPreview} alt="Attachment preview" />
+                      <button
+                        type="button"
+                        className="text-button danger-text"
+                        onClick={() => {
+                          setAttachment(undefined);
+                          setAttachmentPreview('');
+                          setAttachmentError('');
+                        }}
+                      >
+                        Remove image
+                      </button>
+                    </div>
+                  )}
+                  <div className="composer-input-row">
+                    <div className="composer-tools">
+                      <button
+                        type="button"
+                        className="composer-tool"
+                        aria-label="Add emoji"
+                        aria-expanded={showEmojiPicker}
+                        onClick={() => setShowEmojiPicker((shown) => !shown)}
+                      >
+                        ☺
+                      </button>
+                      <label className="composer-tool attach-tool" aria-label="Attach image">
+                        +
+                        <input
+                          type="file"
+                          accept="image/jpeg,image/png,image/webp"
+                          onChange={(event) => chooseAttachment(event.target.files?.[0])}
+                        />
+                      </label>
+                    </div>
                     <textarea
+                      aria-label="Message"
                       value={reply}
                       onChange={(event) => setReply(event.target.value)}
-                      maxLength={4096}
-                      placeholder="Write a WhatsApp reply…"
-                      required
+                      maxLength={attachment ? 1024 : 4096}
+                      placeholder="Write a WhatsApp message…"
+                      rows={1}
                     />
-                  </label>
+                    <button
+                      className="primary-button"
+                      disabled={sendReply.isPending || Boolean(attachmentError) || (!reply.trim() && !attachment)}
+                    >
+                      {sendReply.isPending ? 'Sending…' : 'Send'} <span>→</span>
+                    </button>
+                  </div>
+                  {showEmojiPicker && (
+                    <div className="emoji-picker" aria-label="Choose an emoji">
+                      {['🙂', '😊', '👍', '❤️', '🎉', '🙏', '✨', '👋'].map((emoji) => (
+                        <button key={emoji} type="button" onClick={() => insertEmoji(emoji)}>
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   {sendReply.isError && (
                     <div className="alert error">
                       {sendReply.error instanceof Error ? sendReply.error.message : 'Message was not sent.'}
                     </div>
                   )}
+                  {attachmentError && <div className="alert error">{attachmentError}</div>}
                   <div className="composer-footer">
                     <span className="small muted">
-                      Free-form replies are allowed only within the 24-hour customer service window.
+                      WhatsApp customer service window · {(attachment ? 1024 : 4096) - reply.length} characters left
                     </span>
-                    <button className="primary-button" disabled={sendReply.isPending || !reply.trim()}>
-                      {sendReply.isPending ? 'Sending…' : 'Send reply'} <span>→</span>
-                    </button>
                   </div>
                 </form>
               ) : (
@@ -625,6 +852,33 @@ function display(value: unknown): string {
   const record = value as Record<string, unknown>;
   return String(record.profileName ?? record.name ?? record.phoneNumber ?? record.whatsappId ?? record.email ?? '—');
 }
+function customerPhone(value: unknown): string {
+  if (!value || typeof value !== 'object') return '';
+  const record = value as Record<string, unknown>;
+  return String(record.phoneNumber ?? record.whatsappId ?? '');
+}
+function customerActivity(value: unknown): string {
+  if (!value) return 'No recent WhatsApp activity';
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) return 'No recent WhatsApp activity';
+  return `Last message ${formatRelativeDate(value)}`;
+}
+function conversationPreview(value: BasicRecord): string {
+  const unreadCount = Number(value.unreadCount ?? 0);
+  if (unreadCount > 0) return `${unreadCount} unread message${unreadCount === 1 ? '' : 's'}`;
+  return `${String(value.status ?? 'OPEN')} · ${String(value.currentStep ?? 'Conversation')}`;
+}
+function formatRelativeDate(value: unknown): string {
+  if (!value) return '—';
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) return '—';
+  const minutes = Math.max(0, Math.floor((Date.now() - date.getTime()) / 60_000));
+  if (minutes < 1) return 'Just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
 function displayMany(value: unknown): string {
   return Array.isArray(value) ? value.map(display).join(', ') || '—' : '—';
 }
@@ -641,10 +895,65 @@ function formatDate(value: unknown): string {
 function messageText(value: unknown): string {
   if (!value || typeof value !== 'object') return String(value ?? '');
   const record = value as Record<string, unknown>;
-  if (typeof record.text === 'string') return record.text;
+  if (typeof record.caption === 'string') return record.caption;
+  if (typeof record.imageUrl === 'string') return '';
+  if (record.image && typeof record.image === 'object') {
+    const image = record.image as Record<string, unknown>;
+    return String(image.caption ?? 'Image message');
+  }
   if (record.interactive && typeof record.interactive === 'object') {
     const reply = record.interactive as Record<string, unknown>;
     return String(reply.title ?? reply.id ?? 'Interactive response');
   }
-  return JSON.stringify(record);
+  const body = typeof record.text === 'string' ? record.text : '';
+  if (Array.isArray(record.products)) {
+    const names = record.products
+      .map((product) =>
+        product && typeof product === 'object' && 'name' in product ? String(product.name) : '',
+      )
+      .filter(Boolean);
+    const list = names.length ? names.map((name) => `• ${name}`).join('\n') : 'Product catalogue sent';
+    return [body, list].filter(Boolean).join('\n\n');
+  }
+  if (Array.isArray(record.categories)) {
+    const names = record.categories
+      .map((category) =>
+        category && typeof category === 'object' && 'title' in category ? String(category.title) : '',
+      )
+      .filter(Boolean);
+    const list = names.length ? names.map((name) => `• ${name}`).join('\n') : 'Product categories sent';
+    return [body, list].filter(Boolean).join('\n\n');
+  }
+  if (body) return body;
+  if (record.type === 'third-product-interest-trigger') {
+    return 'We would be happy to help you choose the right product. Would you like to connect with our sales team?';
+  }
+  if (typeof record.type === 'string') return record.type.replace(/-/g, ' ');
+  return 'Interactive message';
+}
+function messageImageUrl(value: unknown): string {
+  if (!value || typeof value !== 'object') return '';
+  const record = value as Record<string, unknown>;
+  if (typeof record.imageUrl === 'string') return record.imageUrl;
+  if (record.image && typeof record.image === 'object') {
+    const image = record.image as Record<string, unknown>;
+    return typeof image.link === 'string' ? image.link : '';
+  }
+  return '';
+}
+function receiptLabel(value: unknown): string {
+  switch (String(value)) {
+    case 'QUEUED':
+      return 'Sending…';
+    case 'SENT':
+      return 'Sent ✓';
+    case 'DELIVERED':
+      return 'Delivered ✓✓';
+    case 'READ':
+      return 'Seen ✓✓';
+    case 'FAILED':
+      return 'Failed';
+    default:
+      return String(value ?? '');
+  }
 }

@@ -15,6 +15,7 @@ COPY backend/package.json ./backend/package.json
 COPY frontend/package.json ./frontend/package.json
 RUN npm ci --omit=dev
 COPY --from=build --chown=node:node /app/backend/dist ./backend/dist
+RUN mkdir -p /app/uploads && chown node:node /app/uploads
 USER node
 EXPOSE 5000
 CMD ["npm", "run", "start", "-w", "backend"]

@@ -11,11 +11,12 @@ All timestamps are UTC dates. Mongoose `timestamps` adds `createdAt` and `update
 
 ## Product
 
-`name`, unique `slug`, `description`, `category` (maximum 24 characters for WhatsApp list-row limits), arrays `sizes`, `grits`, `colours`, `backing`, mixed `specifications`, optional `imageUrl`, `isActive`.
+`name`, unique `slug`, `description`, `category` (maximum 32 characters), arrays `sizes`, `grits`, `colours`, `backing`, mixed `specifications`, optional `imageUrl`, `isActive`.
 
 - Category/active index for catalogue lookup.
 - Text index across name, description, and category.
 - Inactive products are soft-archived and excluded from WhatsApp discovery.
+- Admins can upload JPEG, PNG, or WebP images up to 5 MiB. The generated public URL is stored as `imageUrl`; keep the upload directory persistent and set `APP_URL` to the externally reachable API origin for Meta media fetches.
 
 ## Conversation
 
@@ -51,6 +52,14 @@ All timestamps are UTC dates. Mongoose `timestamps` adds `createdAt` and `update
 ## WorkspaceSettings
 
 Single `workspace` record with public business phone number, configurable welcome text, and the administrator that last changed it. It does not contain Meta credentials.
+
+## ActivityLog
+
+Append-only operational history with `source` (`USER | SYSTEM`), action/summary, resource type and optional ObjectId, actor reference/role, response status, and UTC `occurredAt`.
+
+- Indexed by event time and source/time for paginated admin review.
+- Authenticated write attempts, service startup/shutdown, and exhausted WhatsApp webhook retries are recorded.
+- Request bodies, customer message content, credentials, and query strings are not stored.
 
 ## User, MessageTemplate, RevokedToken
 

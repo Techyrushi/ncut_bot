@@ -1,5 +1,10 @@
+import { randomUUID } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import express from 'express';
 import { Router } from 'express';
 import { z } from 'zod';
+import { env } from '../../config/env';
 import { Product } from '../../database/models/product.model';
 import { authenticate, requireRoles } from '../../middleware/auth';
 import { asyncHandler } from '../../utils/async-handler';
@@ -13,7 +18,7 @@ const productSchema = z.object({
     .toLowerCase()
     .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
   description: z.string().trim().min(1).max(5000),
-  category: z.string().trim().min(1).max(24),
+  category: z.string().trim().min(1).max(32),
   sizes: z.array(z.string().trim()).default([]),
   grits: z.array(z.string().trim()).default([]),
   colours: z.array(z.string().trim()).default([]),
@@ -33,7 +38,7 @@ const productUpdateSchema = z
       .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
       .optional(),
     description: z.string().trim().min(1).max(5000).optional(),
-    category: z.string().trim().min(1).max(24).optional(),
+    category: z.string().trim().min(1).max(32).optional(),
     sizes: z.array(z.string().trim()).optional(),
     grits: z.array(z.string().trim()).optional(),
     colours: z.array(z.string().trim()).optional(),
@@ -45,6 +50,59 @@ const productUpdateSchema = z
   .refine((value) => Object.keys(value).length > 0, 'At least one product field must be provided');
 
 export const productsRouter = Router();
+
+productsRouter.post(
+  '/image-upload',
+  authenticate,
+  requireRoles('ADMIN', 'SALES'),
+  express.raw({ type: ['image/jpeg', 'image/png', 'image/webp'], limit: '5mb' }),
+  asyncHandler(async (req, res) => {
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0)
+      throw new ApiError(400, 'Upload a JPEG, PNG, or WebP product image', 'INVALID_IMAGE');
+
+    const extensionByType: Record<string, string> = {
+      'image/jpeg': 'jpg',
+      'image/png': 'png',
+      'image/webp': 'webp',
+    };
+    const contentType = req.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? '';
+    const extension = extensionByType[contentType];
+    if (!extension) throw new ApiError(415, 'Only JPEG, PNG, and WebP images are supported', 'UNSUPPORTED_IMAGE');
+    const bytes = req.body as Buffer;
+    const validSignature =
+      (extension === 'jpg' && bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) ||
+      (extension === 'png' && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) ||
+      (extension === 'webp' &&
+        bytes.length >= 12 &&
+        bytes.toString('ascii', 0, 4) === 'RIFF' &&
+        bytes.toString('ascii', 8, 12) === 'WEBP');
+    if (!validSignature) throw new ApiError(400, 'Image content does not match its file type', 'INVALID_IMAGE');
+
+    const filename = `${randomUUID()}.${extension}`;
+    const uploadDirectory = resolve(process.cwd(), 'uploads');
+    await mkdir(uploadDirectory, { recursive: true });
+    await writeFile(resolve(uploadDirectory, filename), bytes, { flag: 'wx', mode: 0o644 });
+
+    res.status(201).json({
+      success: true,
+      data: { imageUrl: new URL(`/uploads/${filename}`, env.APP_URL).toString() },
+    });
+  }),
+);
+
+productsRouter.get(
+  '/categories',
+  authenticate,
+  asyncHandler(async (_req, res) => {
+    const categories = await Product.distinct('category');
+    res.json({
+      success: true,
+      data: categories.filter((category): category is string => typeof category === 'string').sort((a, b) =>
+        a.localeCompare(b),
+      ),
+    });
+  }),
+);
 
 productsRouter.get(
   '/',

@@ -1,8 +1,11 @@
+import { useEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
 import { api } from '../services/api';
-import type { ApiResponse } from '../types/api';
+import type { ApiResponse, PageResult } from '../types/api';
+
+type NotificationConversation = Record<string, unknown> & { _id: string };
 
 const navItems = [
   ['/', 'Overview'],
@@ -10,10 +13,7 @@ const navItems = [
   ['/customers', 'Customers'],
   ['/conversations', 'Conversations'],
   ['/leads', 'Leads'],
-  ['/sales-team', 'Sales team'],
-  ['/templates', 'Message templates'],
   ['/whatsapp', 'WhatsApp setup'],
-  ['/automation', 'Automation'],
   ['/account-security', 'Account security'],
   ['/logs', 'System logs'],
 ];
@@ -21,34 +21,57 @@ const navItems = [
 export function AdminLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [notificationFlash, setNotificationFlash] = useState(false);
+  const previousUnread = useRef<number | null>(null);
   const channel = useQuery({
     queryKey: ['whatsapp-config'],
     queryFn: async () => (await api.get<ApiResponse<{ configured: boolean }>>('/whatsapp/configuration')).data.data,
   });
+  const conversations = useQuery({
+    queryKey: ['conversations'],
+    queryFn: async () =>
+      (await api.get<ApiResponse<PageResult<NotificationConversation>>>('/conversations?limit=100')).data.data.items,
+    refetchInterval: 5000,
+    refetchOnWindowFocus: true,
+  });
+  const unread = (conversations.data ?? []).filter((item) => Number(item.unreadCount ?? 0) > 0);
+  const unreadTotal = unread.reduce((sum, item) => sum + Number(item.unreadCount ?? 0), 0);
+  useEffect(() => {
+    if (previousUnread.current !== null && unreadTotal > previousUnread.current) {
+      setNotificationFlash(true);
+      const timer = window.setTimeout(() => setNotificationFlash(false), 1800);
+      previousUnread.current = unreadTotal;
+      return () => window.clearTimeout(timer);
+    }
+    previousUnread.current = unreadTotal;
+  }, [unreadTotal]);
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-mark">O</div>
+          <img className="brand-logo" src="/ncut_logo.jpeg" alt="N-CUT Abrasives" />
           <div>
-            <strong>orbit</strong>
-            <span>SALES CONSOLE</span>
+            <strong>N-CUT</strong>
+            <span>ABRASIVES SALES</span>
           </div>
         </div>
         <div className="workspace-label">WORKSPACE</div>
         <nav className="nav-list">
-          {navItems.map(([path, label], index) => (
-            <NavLink
-              key={path}
-              to={path}
-              end={path === '/'}
-              className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-            >
-              <span className="nav-index">{String(index + 1).padStart(2, '0')}</span>
-              {label}
-              {label === 'Leads' && <span className="nav-dot" />}
-            </NavLink>
-          ))}
+          {navItems
+            .filter(([path]) => path !== '/logs' || user?.role === 'ADMIN')
+            .map(([path, label], index) => (
+              <NavLink
+                key={path}
+                to={path}
+                end={path === '/'}
+                className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+              >
+                <span className="nav-index">{String(index + 1).padStart(2, '0')}</span>
+                {label}
+                {label === 'Leads' && <span className="nav-dot" />}
+              </NavLink>
+            ))}
         </nav>
         <div className="sidebar-footer">
           <div className="avatar">{user?.name.slice(0, 1).toUpperCase()}</div>
@@ -71,7 +94,7 @@ export function AdminLayout() {
       <main className="main-panel">
         <header className="topbar">
           <div>
-            <span className="eyebrow">WORKSPACE / OPERATIONS</span>
+            <span className="eyebrow">N-CUT ABRASIVES / OPERATIONS</span>
             <strong>Product catalogue & sales</strong>
           </div>
           <div className="topbar-right">
@@ -83,6 +106,89 @@ export function AdminLayout() {
                 : 'Setup needed'}
             <span className="topbar-separator">•</span>{' '}
             {new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+            <div className="notification-menu">
+              <button
+                type="button"
+                className={`notification-bell ${notificationFlash ? 'is-flashing' : ''}`}
+                aria-label={
+                  conversations.isError
+                    ? 'Message notifications unavailable'
+                    : `Notifications${unreadTotal ? `, ${unreadTotal} unread messages` : ''}`
+                }
+                aria-expanded={notificationsOpen}
+                onClick={() => setNotificationsOpen((open) => !open)}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="1.7"
+                  />
+                </svg>
+                {unreadTotal > 0 && <span className="notification-count">{unreadTotal > 99 ? '99+' : unreadTotal}</span>}
+              </button>
+              {notificationsOpen && (
+                <div className="notification-dropdown">
+                  <div className="notification-dropdown-heading">
+                    <strong>Messages</strong>
+                    <span>{unreadTotal ? `${unreadTotal} unread` : 'All caught up'}</span>
+                  </div>
+                  {conversations.isError ? (
+                    <p className="notification-empty" role="alert">
+                      {conversations.error instanceof Error
+                        ? conversations.error.message
+                        : 'Unable to load message notifications.'}
+                    </p>
+                  ) : unread.length ? (
+                    unread.slice(0, 8).map((conversation) => {
+                      const customer = conversation.customerId;
+                      const customerRecord =
+                        customer && typeof customer === 'object' ? (customer as Record<string, unknown>) : {};
+                      const name = String(
+                        customerRecord.profileName ??
+                          customerRecord.name ??
+                          customerRecord.phoneNumber ??
+                          'Customer',
+                      );
+                      return (
+                        <button
+                          key={conversation._id}
+                          className="notification-item"
+                          onClick={() => {
+                            setNotificationsOpen(false);
+                            navigate(`/conversations?conversation=${encodeURIComponent(conversation._id)}`);
+                          }}
+                        >
+                          <span className="notification-item-avatar">{name.slice(0, 1).toUpperCase()}</span>
+                          <span>
+                            <strong>{name}</strong>
+                            <small>
+                              {Number(conversation.unreadCount)} new message
+                              {Number(conversation.unreadCount) === 1 ? '' : 's'}
+                            </small>
+                          </span>
+                          <span className="notification-unread-dot" />
+                        </button>
+                      );
+                    })
+                  ) : (
+                    <p className="notification-empty">New customer messages will appear here.</p>
+                  )}
+                  <button
+                    className="notification-footer"
+                    onClick={() => {
+                      setNotificationsOpen(false);
+                      navigate('/conversations');
+                    }}
+                  >
+                    Open conversations
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </header>
         <div className="page-content">

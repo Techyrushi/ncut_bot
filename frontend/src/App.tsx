@@ -7,7 +7,8 @@ import { LoginPage } from './pages/LoginPage';
 import { ProductsPage } from './pages/ProductsPage';
 import { RecordsPage } from './pages/RecordsPage';
 import { ConversationsPage, LeadsPage, TeamPage, TemplatesPage } from './pages/OperationsPages';
-import { AutomationSettingsPage, UtilityPage, WhatsAppSetupPage } from './pages/UtilityPages';
+import { AutomationSettingsPage, WhatsAppSetupPage } from './pages/UtilityPages';
+import { SystemLogsPage } from './pages/SystemLogsPage';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { AccountSecurityPage } from './pages/AccountSecurityPage';
 
@@ -35,16 +36,7 @@ export default function App() {
                 <Route path="whatsapp" element={<WhatsAppSetupPage />} />
                 <Route path="automation" element={<AutomationSettingsPage />} />
                 <Route path="account-security" element={<AccountSecurityPage />} />
-                <Route
-                  path="logs"
-                  element={
-                    <UtilityPage
-                      title="System logs"
-                      eyebrow="SYSTEM / OBSERVABILITY"
-                      description="Structured backend logs are emitted to the configured deployment log collector."
-                    />
-                  }
-                />
+                <Route path="logs" element={<SystemLogsPage />} />
                 <Route path="*" element={<DashboardPage />} />
               </Route>
             </Route>

@@ -169,6 +169,22 @@ export class WhatsAppService {
       template: { name, language: { code: languageCode }, ...(components ? { components } : {}) },
     });
   }
+
+  async markRead(messageId: string): Promise<void> {
+    const response = await fetch(this.endpoint, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${env.WHATSAPP_ACCESS_TOKEN}`,
+        'content-type': 'application/json',
+      },
+      signal: AbortSignal.timeout(10_000),
+      body: JSON.stringify({ messaging_product: 'whatsapp', status: 'read', message_id: messageId }),
+    });
+    if (!response.ok) {
+      const data = (await response.json().catch(() => ({}))) as { error?: { message?: string } };
+      throw new ApiError(502, data.error?.message ?? 'WhatsApp read receipt failed', 'WHATSAPP_API_ERROR');
+    }
+  }
 }
 
 export const whatsappService = new WhatsAppService();

@@ -18,7 +18,10 @@ import { whatsappConfigRouter } from './modules/whatsapp/config.routes';
 import { whatsappWebhookRouter } from './modules/webhook/webhook.routes';
 import { templatesRouter } from './modules/templates/templates.routes';
 import { settingsRouter } from './modules/settings/settings.routes';
+import { activityLogMiddleware } from './modules/logs/activity-log';
+import { logsRouter } from './modules/logs/logs.routes';
 import mongoose from 'mongoose';
+import { resolve } from 'node:path';
 
 export const app = express();
 
@@ -32,6 +35,15 @@ app.use(
   }),
 );
 app.use(pinoHttp({ logger }));
+app.use(activityLogMiddleware);
+app.use(
+  '/uploads',
+  (_req, res, next) => {
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    next();
+  },
+  express.static(resolve(process.cwd(), 'uploads'), { index: false, maxAge: '1d' }),
+);
 app.use(
   '/api/v1/webhooks/whatsapp',
   rateLimit({ windowMs: 60 * 1000, limit: 120, standardHeaders: 'draft-7', legacyHeaders: false }),
@@ -52,6 +64,7 @@ app.use('/api/v1/whatsapp/configuration', whatsappConfigRouter);
 app.use('/api/v1/templates', templatesRouter);
 app.use('/api/v1/dashboard', dashboardRouter);
 app.use('/api/v1/settings', settingsRouter);
+app.use('/api/v1/logs', logsRouter);
 
 app.get('/api/v1/health', (_req, res) => {
   const isConnected = mongoose.connection.readyState === 1;

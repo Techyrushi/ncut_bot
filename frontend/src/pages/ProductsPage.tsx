@@ -1,8 +1,52 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
 import type { ApiResponse, PageResult, Product } from '../types/api';
 import { useAuth } from '../contexts/AuthContext';
+
+const suggestedCategories = [
+  'Flap Disc',
+  'Velcro Disc',
+  'PSA Disc',
+  'Velcro & PSA Backup Pads',
+  'Fiber Disc',
+  'Quick Change Disc',
+  'Mop Wheel',
+  'Non-Woven Disc',
+  'Non-Woven Wheel',
+  'Non-Woven Velcro Disc',
+  'Hand Pad',
+  'Cutting Wheel',
+  'DC Wheel (Grinding Wheel)',
+  'Emery Roll',
+  'Abrasive Belts',
+];
+
+type ProductDraft = {
+  name: string;
+  category: string;
+  description: string;
+  imageUrl: string;
+  sizes: string;
+  grits: string;
+  colours: string;
+  backing: string;
+  specifications: string;
+};
+
+type ProductPayload = Omit<Product, '_id' | 'isActive'>;
+
+const emptyDraft: ProductDraft = {
+  name: '',
+  category: '',
+  description: '',
+  imageUrl: '',
+  sizes: '',
+  grits: '',
+  colours: '',
+  backing: '',
+  specifications: '',
+};
 
 export function ProductsPage() {
   const client = useQueryClient();
@@ -11,44 +55,132 @@ export function ProductsPage() {
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string>();
   const [notice, setNotice] = useState('');
-  const emptyDraft = {
-    name: '',
-    slug: '',
-    category: '',
-    description: '',
-    imageUrl: '',
-    sizes: '',
-    grits: '',
-    colours: '',
-    backing: '',
-    specifications: '{}',
-  };
+  const [search, setSearch] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'archived'>('all');
+  const [page, setPage] = useState(1);
   const [draft, setDraft] = useState(emptyDraft);
+  const [imageFile, setImageFile] = useState<File>();
+  const [imagePreview, setImagePreview] = useState('');
+  const pageSize = 10;
+  const productQueryKey = ['products', search, categoryFilter, statusFilter, page] as const;
+
+  useEffect(() => {
+    if (!imagePreview.startsWith('blob:')) return;
+    return () => URL.revokeObjectURL(imagePreview);
+  }, [imagePreview]);
+
   const products = useQuery({
-    queryKey: ['products'],
-    queryFn: async () => (await api.get<ApiResponse<PageResult<Product>>>('/products?active=all')).data.data.items,
-  });
-  const save = useMutation({
-    mutationFn: async ({ id, body }: { id?: string; body: typeof draft }) => {
-      const { sizes, grits, colours, backing, specifications, ...fields } = body;
-      const payload = {
-        ...fields,
-        sizes: splitValues(sizes),
-        grits: splitValues(grits),
-        colours: splitValues(colours),
-        backing: splitValues(backing),
-        specifications: JSON.parse(specifications) as Record<string, unknown>,
-      };
-      return id ? api.put(`/products/${id}`, payload) : api.post('/products', payload);
+    queryKey: productQueryKey,
+    queryFn: async () => {
+      const params = new URLSearchParams({
+        page: String(page),
+        limit: String(pageSize),
+        active: statusFilter === 'all' ? 'all' : String(statusFilter === 'archived'),
+      });
+      if (search.trim()) params.set('search', search.trim());
+      if (categoryFilter) params.set('category', categoryFilter);
+      return (await api.get<ApiResponse<PageResult<Product>>>(`/products?${params}`)).data.data;
     },
-    onSuccess: async () => {
-      await client.invalidateQueries({ queryKey: ['products'] });
+  });
+  const categoryOptions = useQuery({
+    queryKey: ['product-categories'],
+    queryFn: async () => (await api.get<ApiResponse<string[]>>('/products/categories')).data.data,
+  });
+  const categories = [...new Set([...suggestedCategories, ...(categoryOptions.data ?? [])])].sort((a, b) =>
+    a.localeCompare(b),
+  );
+  const catalogCategories = categoryOptions.data ?? [];
+  const save = useMutation({
+    mutationFn: async ({ id, body, file }: { id?: string; body: ProductPayload; file?: File }) => {
+      let payload = body;
+      if (file) {
+        const upload = await api.post<ApiResponse<{ imageUrl: string }>>('/products/image-upload', file, {
+          headers: { 'Content-Type': file.type },
+        });
+        payload = { ...payload, imageUrl: upload.data.data.imageUrl };
+      }
+      const response = id
+        ? await api.put<ApiResponse<Product>>(`/products/${id}`, payload)
+        : await api.post<ApiResponse<Product>>('/products', payload);
+      return response.data.data;
+    },
+    onMutate: async ({ id, body, file }) => {
+      await client.cancelQueries({ queryKey: ['products'] });
+      const previous = client.getQueryData<PageResult<Product>>(productQueryKey);
+      const existing = previous?.items.find((product) => product._id === id);
+      const optimistic: Product = {
+        ...body,
+        _id: id ?? `optimistic-${Date.now()}`,
+        imageUrl: imagePreview || body.imageUrl || (file ? URL.createObjectURL(file) : ''),
+        isActive: existing?.isActive ?? true,
+      };
+      client.setQueryData<PageResult<Product>>(productQueryKey, (current) => {
+        if (!current) return current;
+        if (id) {
+          const matchesStatus =
+            statusFilter === 'all' ||
+            (statusFilter === 'active' && optimistic.isActive) ||
+            (statusFilter === 'archived' && !optimistic.isActive);
+          const matchesFilters =
+            (!categoryFilter || body.category === categoryFilter) &&
+            matchesStatus &&
+            (!search.trim() ||
+              `${body.name} ${body.slug} ${body.category} ${body.description}`
+                .toLowerCase()
+                .includes(search.trim().toLowerCase()));
+          const alreadyListed = current.items.some((product) => product._id === id);
+          return {
+            ...current,
+            items: alreadyListed
+              ? matchesFilters
+                ? current.items.map((product) => (product._id === id ? optimistic : product))
+                : current.items.filter((product) => product._id !== id)
+              : current.items,
+            total: alreadyListed && !matchesFilters ? Math.max(0, current.total - 1) : current.total,
+          };
+        }
+        const matchesFilters =
+          page === 1 &&
+          (statusFilter === 'all' || statusFilter === 'active') &&
+          (!categoryFilter || body.category === categoryFilter) &&
+          (!search.trim() ||
+            `${body.name} ${body.slug} ${body.category} ${body.description}`
+              .toLowerCase()
+              .includes(search.trim().toLowerCase()));
+        return matchesFilters
+          ? { ...current, items: [optimistic, ...current.items].slice(0, pageSize), total: current.total + 1 }
+          : current;
+      });
+      return { previous };
+    },
+    onSuccess: async (product, variables) => {
+      await client.invalidateQueries({ queryKey: ['product-categories'] });
+      client.setQueryData<PageResult<Product>>(productQueryKey, (current) => {
+        if (!current) return current;
+        const index = current.items.findIndex((item) =>
+          variables.id ? item._id === variables.id : item._id.startsWith('optimistic-'),
+        );
+        if (index < 0) return current;
+        return {
+          ...current,
+          items: current.items.map((item, itemIndex) => (itemIndex === index ? product : item)),
+        };
+      });
       setShowForm(false);
       setEditingId(undefined);
       setDraft(emptyDraft);
-      setNotice(editingId ? 'Product details updated.' : 'Product added to your catalogue.');
+      setImageFile(undefined);
+      setImagePreview('');
+      setNotice(variables.id ? 'Product details updated.' : 'Product added to your catalogue.');
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : 'Unable to save product.'),
+    onError: (error, _variables, context) => {
+      if (context?.previous) client.setQueryData(productQueryKey, context.previous);
+      setNotice(error instanceof Error ? error.message : 'Unable to save product.');
+    },
+    onSettled: async () => {
+      await client.invalidateQueries({ queryKey: ['products'] });
+    },
   });
   const remove = useMutation({
     mutationFn: async (id: string) => api.delete(`/products/${id}`),
@@ -56,16 +188,43 @@ export function ProductsPage() {
       await client.invalidateQueries({ queryKey: ['products'] });
       setNotice('Product archived.');
     },
+    onError: (error) => setNotice(error instanceof Error ? error.message : 'Unable to archive product.'),
   });
+
   function submit(event: FormEvent) {
     event.preventDefault();
-    save.mutate({ id: editingId, body: draft });
+    if (!imageFile && !draft.imageUrl) {
+      setNotice('Add a product image so WhatsApp can show it to customers.');
+      return;
+    }
+
+    let specifications: Record<string, unknown>;
+    try {
+      specifications = parseDetails(draft.specifications);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Check the additional product details.');
+      return;
+    }
+
+    const body: ProductPayload = {
+      name: draft.name.trim(),
+      slug: makeSlug(draft.name),
+      category: draft.category,
+      description: draft.description.trim(),
+      imageUrl: draft.imageUrl,
+      sizes: splitValues(draft.sizes),
+      grits: splitValues(draft.grits),
+      colours: splitValues(draft.colours),
+      backing: splitValues(draft.backing),
+      specifications,
+    };
+    save.mutate({ id: editingId, body, file: imageFile });
   }
+
   function edit(product: Product) {
     setEditingId(product._id);
     setDraft({
       name: product.name,
-      slug: product.slug,
       category: product.category,
       description: product.description,
       imageUrl: product.imageUrl ?? '',
@@ -73,13 +232,36 @@ export function ProductsPage() {
       grits: product.grits.join(', '),
       colours: product.colours.join(', '),
       backing: product.backing.join(', '),
-      specifications: JSON.stringify(
-        (product as Product & { specifications?: Record<string, unknown> }).specifications ?? {},
-        null,
-        2,
-      ),
+      specifications: Object.entries(product.specifications ?? {})
+        .map(([key, value]) => `${key}: ${String(value)}`)
+        .join('\n'),
     });
+    setImageFile(undefined);
+    setImagePreview(product.imageUrl ?? '');
     setShowForm(true);
+  }
+
+  function chooseImage(file?: File) {
+    if (!file) return;
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setNotice('Choose a JPEG, PNG, or WebP image.');
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setNotice('Product images must be 5 MB or smaller.');
+      return;
+    }
+    setNotice('');
+    setImageFile(file);
+    setImagePreview(URL.createObjectURL(file));
+  }
+
+  function startNewProduct() {
+    setEditingId(undefined);
+    setDraft(emptyDraft);
+    setImageFile(undefined);
+    setImagePreview('');
+    setShowForm((open) => !open);
   }
 
   return (
@@ -91,108 +273,246 @@ export function ProductsPage() {
           <p>Keep product information accurate for every automated conversation.</p>
         </div>
         {canEdit && (
-          <button
-            className="primary-button"
-            onClick={() => {
-              setEditingId(undefined);
-              setDraft(emptyDraft);
-              setShowForm(!showForm);
-            }}
-          >
+          <button className="primary-button" onClick={startNewProduct}>
             ＋ Add product
           </button>
         )}
       </div>
       {notice && (
-        <div className="alert">
+        <div className="alert" role="status">
           {notice}
           <button onClick={() => setNotice('')}>×</button>
         </div>
       )}
       {showForm && (
         <form className="panel product-form" onSubmit={submit}>
-          <div className="panel-heading">
-            <div>
-              <div className="eyebrow">{editingId ? 'EDIT CATALOGUE ITEM' : 'NEW CATALOGUE ITEM'}</div>
-              <h2>Product details</h2>
+          <div className="product-form-heading">
+            <div className="product-form-title">
+              <span className="product-form-icon">✦</span>
+              <div>
+                <div className="eyebrow">{editingId ? 'EDIT CATALOGUE ITEM' : 'NEW CATALOGUE ITEM'}</div>
+                <h2>{editingId ? 'Update your product' : 'Add a catalogue product'}</h2>
+                <p>Share accurate product information with your team and WhatsApp customers.</p>
+              </div>
             </div>
-            <button type="button" className="text-button" onClick={() => setShowForm(false)}>
-              Close
+            <button type="button" className="secondary-button" onClick={() => setShowForm(false)}>
+              Cancel
             </button>
           </div>
-          <div className="form-grid">
-            {(
-              [
-                'name',
-                'slug',
-                'category',
-                'imageUrl',
-                'description',
-                'sizes',
-                'grits',
-                'colours',
-                'backing',
-                'specifications',
-              ] as const
-            ).map((field) => (
-              <label key={field} className={['description', 'specifications'].includes(field) ? 'wide' : ''}>
-                {field === 'imageUrl' ? 'Image URL (optional)' : field[0].toUpperCase() + field.slice(1)}
-                {['description', 'specifications'].includes(field) ? (
-                  <textarea
-                    required={field === 'description'}
-                    value={draft[field]}
-                    onChange={(e) => setDraft({ ...draft, [field]: e.target.value })}
-                  />
-                ) : (
-                  <input
-                    required={['name', 'slug', 'category'].includes(field)}
-                    placeholder={
-                      ['sizes', 'grits', 'colours', 'backing'].includes(field) ? 'Comma-separated values' : ''
-                    }
-                    value={draft[field]}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        [field]:
-                          field === 'name' && !draft.slug
-                            ? e.target.value.toLowerCase().replace(/[^a-z0-9]+/g, '-')
-                            : e.target.value,
-                      })
-                    }
-                  />
-                )}
+          <div className="product-form-section">
+            <div className="product-section-heading">
+              <span>01</span>
+              <div>
+                <strong>Product overview</strong>
+                <small>Name, category, and a customer-friendly description.</small>
+              </div>
+            </div>
+            <div className="form-grid">
+              <label>
+                <span className="field-label">
+                  Product name <span className="required-mark">*</span>
+                </span>
+                <input
+                  required
+                  maxLength={160}
+                  value={draft.name}
+                  onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+                  placeholder="e.g. Premium flap disc"
+                />
               </label>
-            ))}
+              <label>
+                <span className="field-label">
+                  Product category <span className="required-mark">*</span>
+                </span>
+                <CategoryCombobox
+                  categories={categories}
+                  value={draft.category}
+                  onChange={(category) => setDraft({ ...draft, category })}
+                  required
+                />
+              </label>
+              <label className="wide">
+                <span className="field-label">
+                  Product description <span className="required-mark">*</span>
+                </span>
+                <textarea
+                  required
+                  maxLength={5000}
+                  value={draft.description}
+                  onChange={(event) => setDraft({ ...draft, description: event.target.value })}
+                  placeholder="Describe the product, its use, and what makes it suitable."
+                />
+                <span className="field-hint">{draft.description.length}/5000 characters</span>
+              </label>
+            </div>
           </div>
-          <p className="muted small">
-            Only enter verified product descriptions and specifications. Specifications must be a JSON object.
-          </p>
-          <button className="primary-button" disabled={save.isPending}>
-            {save.isPending ? 'Saving…' : editingId ? 'Save changes' : 'Save product'} <span>→</span>
-          </button>
+          <div className="product-form-section">
+            <div className="product-section-heading">
+              <span>02</span>
+              <div>
+                <strong>Specifications</strong>
+                <small>Only add verified sizes and technical details.</small>
+              </div>
+            </div>
+            <div className="form-grid product-spec-grid">
+              <label>
+                Sizes
+                <input
+                  placeholder={'e.g. 4", 5", 7"'}
+                  value={draft.sizes}
+                  onChange={(event) => setDraft({ ...draft, sizes: event.target.value })}
+                />
+              </label>
+              <label>
+                Grits
+                <input
+                  placeholder="Comma-separated values"
+                  value={draft.grits}
+                  onChange={(event) => setDraft({ ...draft, grits: event.target.value })}
+                />
+              </label>
+              <label>
+                Colours
+                <input
+                  placeholder="Comma-separated values"
+                  value={draft.colours}
+                  onChange={(event) => setDraft({ ...draft, colours: event.target.value })}
+                />
+              </label>
+              <label>
+                Backing
+                <input
+                  placeholder="e.g. paper, film, metal"
+                  value={draft.backing}
+                  onChange={(event) => setDraft({ ...draft, backing: event.target.value })}
+                />
+              </label>
+              <label className="wide">
+                Additional product details
+                <textarea
+                  value={draft.specifications}
+                  onChange={(event) => setDraft({ ...draft, specifications: event.target.value })}
+                  placeholder={'One detail per line, for example:\nThickness: 13 mm\nHardness: U0, U1, U3'}
+                />
+              </label>
+            </div>
+          </div>
+          <div className="product-form-section">
+            <div className="product-section-heading">
+              <span>03</span>
+              <div>
+                <strong>Product image</strong>
+                <small>Choose the image customers will see in WhatsApp.</small>
+              </div>
+            </div>
+            <div className="product-image-row">
+              <label className="product-image-drop">
+                <input
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp"
+                  required={!draft.imageUrl && !imageFile}
+                  onChange={(event) => chooseImage(event.target.files?.[0])}
+                />
+                <span className="upload-icon">↑</span>
+                <strong>{imageFile?.name ?? (imagePreview ? 'Choose a different image' : 'Choose an image from your device')}</strong>
+                <small>JPEG, PNG, or WebP · up to 5 MB</small>
+              </label>
+              {imagePreview ? (
+                <div className="product-preview-card">
+                  <img className="product-image-preview" src={imagePreview} alt="Product preview" />
+                  <span>WhatsApp preview</span>
+                </div>
+              ) : (
+                <div className="product-preview-placeholder">
+                  <span>▧</span>
+                  <small>Your product image preview</small>
+                </div>
+              )}
+            </div>
+          </div>
+          <div className="product-form-footer">
+            <p className="muted small">These verified details and image will be shared with WhatsApp customers.</p>
+            <button className="primary-button" disabled={save.isPending}>
+              {save.isPending ? 'Saving product…' : editingId ? 'Save changes' : 'Save product'} <span>→</span>
+            </button>
+          </div>
         </form>
       )}
       <div className="panel table-panel">
-        <div className="panel-heading">
+        <div className="panel-heading product-table-heading">
           <div>
             <div className="eyebrow">PRODUCT LIBRARY</div>
-            <h2>{products.data?.length ?? 0} catalogue items</h2>
+            <h2>{products.data?.total ?? 0} catalogue items</h2>
           </div>
-          <div className="search-wrap">
-            <span>⌕</span>
+          <div className="table-result-count">
+            Showing {products.data?.items.length ?? 0} of {products.data?.total ?? 0}
+          </div>
+        </div>
+        <div className="table-toolbar">
+          <label className="table-search">
+            <span aria-hidden="true">⌕</span>
             <input
-              placeholder="Search catalogue"
-              onChange={(e) => {
-                /* Search is supported by the API query contract. */ void e.target.value;
+              placeholder="Search products..."
+              aria-label="Search products"
+              value={search}
+              onChange={(event) => {
+                setSearch(event.target.value);
+                setPage(1);
               }}
             />
-          </div>
+          </label>
+          <label className="filter-control">
+            <span>Category</span>
+            <select
+              aria-label="Filter products by category"
+              value={categoryFilter}
+              onChange={(event) => {
+                setCategoryFilter(event.target.value);
+                setPage(1);
+              }}
+            >
+              <option value="">All products</option>
+              {catalogCategories.map((category) => (
+                <option key={category}>{category}</option>
+              ))}
+            </select>
+          </label>
+          <label className="filter-control">
+            <span>Status</span>
+            <select
+              aria-label="Filter products by status"
+              value={statusFilter}
+              onChange={(event) => {
+                setStatusFilter(event.target.value as typeof statusFilter);
+                setPage(1);
+              }}
+            >
+              <option value="all">All products</option>
+              <option value="active">Active</option>
+              <option value="archived">Archived</option>
+            </select>
+          </label>
+          {(search || categoryFilter || statusFilter !== 'all') && (
+            <button
+              type="button"
+              className="table-reset-button"
+              onClick={() => {
+                setSearch('');
+                setCategoryFilter('');
+                setStatusFilter('all');
+                setPage(1);
+              }}
+            >
+              Clear filters
+            </button>
+          )}
         </div>
         {products.isError && (
           <div className="alert error">
             {products.error instanceof Error ? products.error.message : 'Unable to load products.'}
           </div>
         )}
+        {products.isLoading && <div className="table-loading">Loading products…</div>}
         <div className="table-scroll">
           <table>
             <thead>
@@ -205,7 +525,7 @@ export function ProductsPage() {
               </tr>
             </thead>
             <tbody>
-              {(products.data ?? []).map((product) => (
+              {(products.data?.items ?? []).map((product) => (
                 <tr key={product._id}>
                   <td>
                     <div className="product-cell">
@@ -243,15 +563,40 @@ export function ProductsPage() {
                   </td>
                 </tr>
               ))}
-              {products.data?.length === 0 && (
+              {products.data?.items.length === 0 && (
                 <tr>
                   <td colSpan={5} className="empty-row">
-                    No products yet. Add verified catalogue details to get started.
+                    No products match these filters. Try changing your search or filters.
                   </td>
                 </tr>
               )}
             </tbody>
           </table>
+        </div>
+        <div className="table-pagination">
+          <span>
+            {products.data?.total
+              ? `Page ${page} of ${Math.max(1, Math.ceil(products.data.total / pageSize))}`
+              : 'No results'}
+          </span>
+          <div>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={page === 1 || products.isFetching}
+              onClick={() => setPage((current) => Math.max(1, current - 1))}
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={!products.data || page * pageSize >= products.data.total || products.isFetching}
+              onClick={() => setPage((current) => current + 1)}
+            >
+              Next
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -263,4 +608,128 @@ function splitValues(value: string): string[] {
     .split(',')
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function makeSlug(value: string): string {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+function parseDetails(value: string): Record<string, string> {
+  const details: Record<string, string> = {};
+  for (const line of value.split('\n').map((item) => item.trim()).filter(Boolean)) {
+    const separator = line.indexOf(':');
+    if (separator <= 0 || !line.slice(separator + 1).trim()) {
+      throw new Error('Write additional details as “Name: value”, one detail per line.');
+    }
+    const key = line.slice(0, separator).trim();
+    if (key in details) throw new Error(`The additional detail “${key}” appears more than once.`);
+    details[key] = line.slice(separator + 1).trim();
+  }
+  return details;
+}
+
+function CategoryCombobox({
+  categories,
+  value,
+  onChange,
+  required = false,
+}: {
+  categories: string[];
+  value: string;
+  onChange: (value: string) => void;
+  required?: boolean;
+}) {
+  const [isOpen, setIsOpen] = useState(false);
+  const normalizedValue = value.trim().toLocaleLowerCase();
+  const matches = categories.filter((category) => category.toLocaleLowerCase().includes(normalizedValue)).slice(0, 8);
+  const canCreate =
+    Boolean(value.trim()) &&
+    value.trim().length <= 32 &&
+    !categories.some((category) => category.toLocaleLowerCase() === normalizedValue);
+  const listId = 'product-category-options';
+
+  function choose(category: string) {
+    onChange(category);
+    setIsOpen(false);
+  }
+
+  return (
+    <div
+      className="category-combobox"
+      onBlur={(event) => {
+        if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) {
+          setIsOpen(false);
+        }
+      }}
+    >
+      <div className="category-combobox-control">
+        <input
+          type="text"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded={isOpen}
+          aria-controls={listId}
+          aria-label="Search or add a product category"
+          autoComplete="off"
+          maxLength={32}
+          required={required}
+          value={value}
+          onFocus={() => setIsOpen(true)}
+          onChange={(event) => {
+            onChange(event.target.value);
+            setIsOpen(true);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') setIsOpen(false);
+            if (event.key === 'ArrowDown' && isOpen) {
+              event.preventDefault();
+              event.currentTarget.parentElement?.parentElement
+                ?.querySelector<HTMLButtonElement>('[role="option"]')
+                ?.focus();
+            }
+            if (event.key === 'Enter' && isOpen) {
+              event.preventDefault();
+              if (matches.length) choose(matches[0]!);
+              else if (canCreate) choose(value.trim());
+            }
+          }}
+          placeholder="Search or type a new category"
+        />
+        <span aria-hidden="true">⌄</span>
+      </div>
+      {isOpen && (
+        <div className="category-combobox-options" id={listId} role="listbox" aria-label="Product categories">
+          {matches.map((category) => (
+            <button
+              type="button"
+              role="option"
+              aria-selected={value === category}
+              key={category}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => choose(category)}
+            >
+              {category}
+            </button>
+          ))}
+          {canCreate && (
+            <button
+              type="button"
+              role="option"
+              className="create-category-option"
+              aria-selected="false"
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => choose(value.trim())}
+            >
+              <span aria-hidden="true">＋</span> Add “{value.trim()}”
+            </button>
+          )}
+          {!matches.length && !canCreate && <span className="category-empty-option">Type a category to add it.</span>}
+        </div>
+      )}
+    </div>
+  );
 }

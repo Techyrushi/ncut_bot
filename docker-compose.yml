@@ -26,6 +26,8 @@ services:
       NODE_ENV: ${NODE_ENV:-development}
     ports:
       - "5000:5000"
+    volumes:
+      - product-images:/app/uploads
     depends_on:
       mongo:
         condition: service_healthy
@@ -44,3 +46,4 @@ services:
 
 volumes:
   mongo-data:
+  product-images:
