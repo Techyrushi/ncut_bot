@@ -1,0 +1,10 @@
+process.env.NODE_ENV = 'test';
+process.env.MONGODB_URI = 'mongodb://127.0.0.1:27017/whatsapp_automation_test';
+process.env.JWT_SECRET = 'test-only-jwt-secret-with-at-least-thirty-two-characters';
+process.env.WHATSAPP_APP_SECRET = 'test-meta-app-secret';
+process.env.WHATSAPP_VERIFY_TOKEN = 'test-verify-token';
+process.env.WHATSAPP_ACCESS_TOKEN = 'test-access-token';
+process.env.WHATSAPP_PHONE_NUMBER_ID = '123456789';
+process.env.WHATSAPP_BUSINESS_ACCOUNT_ID = '987654321';
+process.env.META_GRAPH_API_VERSION = 'v27.0';
+process.env.SALES_NOTIFICATION_PROVIDER = 'log';

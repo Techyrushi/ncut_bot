@@ -1,0 +1,297 @@
+openapi: 3.1.0
+info:
+  title: WhatsApp Product Catalogue & Sales Automation API
+  version: 1.0.0
+  description: REST API for the catalogue, customer conversations, WhatsApp Cloud API, and sales leads.
+servers:
+  - url: http://localhost:5000/api/v1
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      security: []
+      summary: Check API and MongoDB readiness
+      responses:
+        '200': { description: Ready }
+        '503': { description: Database unavailable }
+  /auth/login:
+    post:
+      security: []
+      summary: Authenticate a workspace user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 1 }
+      responses:
+        '200': { description: Bearer token and user }
+        '401': { description: Invalid credentials }
+  /auth/logout:
+    post:
+      summary: Revoke the current bearer token
+      responses:
+        '200': { description: Logged out }
+        '401': { description: Unauthorized }
+  /auth/me:
+    get:
+      summary: Return the current authenticated principal
+      responses:
+        '200': { description: Current user }
+  /products:
+    get:
+      summary: List products
+      parameters:
+        - { in: query, name: page, schema: { type: integer, minimum: 1 } }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100 } }
+        - { in: query, name: search, schema: { type: string } }
+        - { in: query, name: category, schema: { type: string } }
+      responses:
+        '200': { description: Paginated catalogue }
+    post:
+      summary: Create a verified product record
+      responses:
+        '201': { description: Product created }
+        '400': { description: Validation error }
+  /products/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    get:
+      summary: Get product details
+      responses:
+        '200': { description: Product }
+        '404': { description: Not found }
+    put:
+      summary: Update product fields
+      responses:
+        '200': { description: Product updated }
+    delete:
+      summary: Archive product
+      responses:
+        '200': { description: Product archived }
+  /customers:
+    get:
+      summary: Search customers
+      parameters:
+        - { in: query, name: search, schema: { type: string } }
+        - { in: query, name: page, schema: { type: integer } }
+        - { in: query, name: limit, schema: { type: integer, maximum: 100 } }
+      responses:
+        '200': { description: Paginated customer directory }
+  /customers/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    get:
+      summary: Get customer details
+      responses:
+        '200': { description: Customer }
+        '404': { description: Not found }
+  /customers/{id}/opt-in:
+    patch:
+      summary: Record explicit customer consent or opt-out
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status, source]
+              properties:
+                status: { type: string, enum: [OPTED_IN, OPTED_OUT] }
+                source: { type: string, maxLength: 500 }
+      responses:
+        '200': { description: Consent status recorded }
+  /conversations:
+    get:
+      summary: List conversations
+      parameters:
+        - { in: query, name: status, schema: { type: string, enum: [OPEN, HUMAN_HANDOVER, CLOSED] } }
+        - { in: query, name: page, schema: { type: integer } }
+        - { in: query, name: limit, schema: { type: integer, maximum: 100 } }
+      responses:
+        '200': { description: Paginated conversation list }
+  /conversations/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    get:
+      summary: Get a conversation
+      responses:
+        '200': { description: Conversation details }
+  /conversations/{id}/messages:
+    get:
+      summary: Read a conversation history
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+        - { in: query, name: before, schema: { type: string, format: date-time } }
+        - { in: query, name: limit, schema: { type: integer, maximum: 100 } }
+      responses:
+        '200': { description: Chronological messages }
+  /conversations/{id}/status:
+    patch:
+      summary: Close a human-managed conversation
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [CLOSED] }
+      responses:
+        '200': { description: Conversation closed }
+  /leads:
+    get:
+      summary: List and filter sales leads
+      parameters:
+        - { in: query, name: status, schema: { type: string } }
+        - { in: query, name: assignedSalesPerson, schema: { type: string } }
+      responses:
+        '200': { description: Paginated leads }
+  /leads/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    get:
+      summary: Get lead details
+      responses:
+        '200': { description: Lead, customer, and products }
+  /leads/{id}/status:
+    patch:
+      summary: Update lead status
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [NEW, CONTACTED, QUALIFIED, WON, LOST] }
+      responses:
+        '200': { description: Status updated }
+  /leads/{id}/assign:
+    patch:
+      summary: Assign a sales representative
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [userId]
+              properties:
+                userId: { type: string }
+      responses:
+        '200': { description: Lead assigned }
+  /team:
+    get:
+      summary: List sales representatives
+      responses:
+        '200': { description: Sales team }
+    post:
+      summary: Add a sales representative
+      responses:
+        '201': { description: Sales representative created }
+  /team/{id}:
+    patch:
+      summary: Activate or deactivate a sales representative
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Representative updated }
+  /templates:
+    get:
+      summary: List registered WhatsApp templates
+      responses:
+        '200': { description: Template registry }
+    post:
+      summary: Register a template and its verified status
+      responses:
+        '201': { description: Template registered }
+  /templates/{id}/status:
+    patch:
+      summary: Update a template's Meta approval status
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Template status updated }
+  /whatsapp/send-message:
+    post:
+      summary: Send a free-form message within the 24-hour service window
+      responses:
+        '201': { description: Message sent and recorded }
+        '409': { description: Service window expired or customer opted out }
+  /whatsapp/send-image:
+    post:
+      summary: Send an image within the 24-hour service window
+      responses:
+        '201': { description: Image sent and recorded }
+  /whatsapp/send-template:
+    post:
+      summary: Send an approved template to an opted-in customer
+      responses:
+        '201': { description: Template message sent and recorded }
+        '409': { description: Customer opt-in is missing }
+  /whatsapp/configuration:
+    get:
+      summary: Read safe WhatsApp configuration status
+      responses:
+        '200': { description: Configuration status; secrets are never returned }
+  /whatsapp/configuration/test-connection:
+    post:
+      summary: Read-only test of the Meta phone-number credentials
+      responses:
+        '200': { description: Meta phone-number status and public display metadata }
+        '502': { description: Meta rejected the token or phone-number ID }
+  /settings/workspace:
+    get:
+      summary: Read public workspace settings
+      responses:
+        '200': { description: Business number and welcome text }
+    patch:
+      summary: Update business number and automation welcome text
+      responses:
+        '200': { description: Workspace settings saved }
+  /webhooks/whatsapp:
+    get:
+      security: []
+      summary: Verify Meta webhook subscription
+      parameters:
+        - { in: query, name: hub.mode, schema: { type: string } }
+        - { in: query, name: hub.verify_token, schema: { type: string } }
+        - { in: query, name: hub.challenge, schema: { type: string } }
+      responses:
+        '200': { description: Challenge returned }
+        '403': { description: Verification rejected }
+    post:
+      security: []
+      summary: Receive signed Meta webhook events
+      parameters:
+        - { in: header, name: X-Hub-Signature-256, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Event durably queued }
+        '401': { description: Invalid signature }
+  /dashboard/stats:
+    get:
+      summary: Aggregate sales dashboard counters
+      responses:
+        '200': { description: Dashboard metrics }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

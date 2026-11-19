@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+# Local secrets/configuration files at the root and in workspaces
+.env
+.env.*
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+.DS_Store
+npm-debug.log*
+*.log
+.idea/
+.vscode/*
+!.vscode/extensions.json
