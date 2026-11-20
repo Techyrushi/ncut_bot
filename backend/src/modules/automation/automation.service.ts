@@ -3,21 +3,40 @@ import { env } from '../../config/env';
 import { logger } from '../../config/logger';
 import { Conversation } from '../../database/models/conversation.model';
 import { Customer, normalizePhoneIdentity } from '../../database/models/customer.model';
-import { Lead } from '../../database/models/lead.model';
+import { Lead, SALES_FOLLOW_UP_REQUIREMENT } from '../../database/models/lead.model';
 import { Message } from '../../database/models/message.model';
 import { Product } from '../../database/models/product.model';
 import { DEFAULT_WELCOME_MESSAGE, WorkspaceSettings } from '../../database/models/workspace-settings.model';
 import { whatsappService } from '../whatsapp/whatsapp.service';
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const PRODUCT_CATALOGUE_IMAGE_URL = new URL(
-  '/N-CUT%20Abrasives%20Product%20Catalogue%20.png',
-  env.FRONTEND_URL,
-).toString();
+const PRODUCT_CATALOGUE_IMAGE_URL = new URL('/ncut-product-catalogue.jpg', env.FRONTEND_URL).toString();
+const WELCOME_IMAGE_URL = new URL('/ncut-welcome-message-v2.jpg', env.FRONTEND_URL).toString();
 const PRODUCT_CATEGORY_TITLES: Record<string, string> = {
   'Velcro & PSA Backup Pads': 'Velcro & PSA Backup',
   'DC Wheel (Grinding Wheel)': 'DC Grinding Wheel',
 };
+
+function shortProductDescription(description: string): string {
+  const normalized = description.trim().replace(/\s+/g, ' ');
+  if (normalized.length <= 72) return normalized;
+  const prefix = normalized.slice(0, 69);
+  const wordBoundary = prefix.lastIndexOf(' ');
+  return `${prefix.slice(0, wordBoundary > 0 ? wordBoundary : 69).trimEnd()}…`;
+}
+
+function firstCatalogueBody(category: string | undefined, productCount: number): string {
+  if (productCount > 10) {
+    return 'Here are the first 10 products from the catalogue. Select a product to view its photo and full description.';
+  }
+  return category
+    ? `Browse ${category} products and select one to see its photo and full description.`
+    : 'See the catalogue image above, then select a product to see its photo and full description.';
+}
+
+function remainingCatalogueBody(productCount: number): string {
+  return `Here are the remaining ${productCount} ${productCount === 1 ? 'product' : 'products'} from the catalogue. Select a product to view its photo and full description.`;
+}
 
 type IncomingMessage = {
   id: string;
@@ -32,6 +51,70 @@ type IncomingMessage = {
     list_reply?: { id: string; title: string };
   };
 };
+
+type InteractiveButton = { id: string; title: string };
+type InteractiveRow = { id: string; title: string; description?: string };
+type InteractiveSection = { title: string; rows: InteractiveRow[] };
+type ProductCatalogSection = { title: string; product_items: Array<{ product_retailer_id: string }> };
+type DeliveryAction =
+  | { type: 'WELCOME_OPTIONS'; body: string; buttons: InteractiveButton[] }
+  | {
+      type: 'PRODUCT_CATALOG';
+      catalogId: string;
+      header: string;
+      body: string;
+      sectionTitle: string;
+      productIds: string[];
+      remainingProductIds: string[];
+    }
+  | {
+      type: 'PRODUCT_MENU';
+      body: string;
+      buttonText: string;
+      sections: InteractiveSection[];
+      content: Record<string, unknown>;
+      remainingRows?: InteractiveRow[];
+    }
+  | { type: 'PRODUCT_DETAILS'; details: string; productId: string; uniqueProductCount: number }
+  | { type: 'PRODUCT_NEXT_STEPS'; uniqueProductCount: number }
+  | { type: 'THIRD_PRODUCT_INTEREST' };
+
+function isDeliveryAction(value: unknown): value is DeliveryAction {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  if (record.type === 'WELCOME_OPTIONS') return typeof record.body === 'string' && Array.isArray(record.buttons);
+  if (record.type === 'PRODUCT_CATALOG') {
+    return (
+      typeof record.catalogId === 'string' &&
+      typeof record.header === 'string' &&
+      typeof record.body === 'string' &&
+      typeof record.sectionTitle === 'string' &&
+      Array.isArray(record.productIds) &&
+      record.productIds.every((productId) => typeof productId === 'string') &&
+      Array.isArray(record.remainingProductIds) &&
+      record.remainingProductIds.every((productId) => typeof productId === 'string')
+    );
+  }
+  if (record.type === 'PRODUCT_MENU') {
+    return (
+      typeof record.body === 'string' &&
+      typeof record.buttonText === 'string' &&
+      Array.isArray(record.sections) &&
+      Boolean(record.content && typeof record.content === 'object' && !Array.isArray(record.content)) &&
+      (record.remainingRows === undefined || Array.isArray(record.remainingRows))
+    );
+  }
+  if (record.type === 'PRODUCT_DETAILS') {
+    return (
+      typeof record.details === 'string' &&
+      typeof record.productId === 'string' &&
+      typeof record.uniqueProductCount === 'number'
+    );
+  }
+  return record.type === 'PRODUCT_NEXT_STEPS'
+    ? typeof record.uniqueProductCount === 'number'
+    : record.type === 'THIRD_PRODUCT_INTEREST';
+}
 
 function messageContent(message: IncomingMessage): Record<string, unknown> {
   if (message.text) return { text: message.text.body ?? '' };
@@ -68,15 +151,29 @@ export class AutomationService {
       await this.saveInbound(message, customer._id, conversation._id, receivedAt);
       conversation.lastMessageAt = receivedAt;
       conversation.lastInteractionAt = receivedAt;
-      await conversation.save();
       if (/^(stop|unsubscribe|opt out)$/i.test(message.text?.body?.trim() ?? '')) {
         customer.optInStatus = 'OPTED_OUT';
         await customer.save();
+        await conversation.save();
         return;
       }
-      if (this.selection(message)?.id === 'connect_sales') {
-        await this.handover(customer._id, conversation._id, recipient, message.id, receivedAt);
-      }
+      await conversation.save();
+      if (customer.optInStatus === 'OPTED_OUT') return;
+
+      await Conversation.updateOne(
+        { _id: conversation._id, status: 'HUMAN_HANDOVER' },
+        {
+          $set: { status: 'OPEN', currentStep: 'NEW', selectedProductIds: [], uniqueProductCount: 0 },
+          $unset: {
+            interestTriggeredAt: 1,
+            interestPromptStatus: 1,
+            interestPromptLockedAt: 1,
+            currentCategory: 1,
+            handoverAt: 1,
+          },
+        },
+      );
+      await this.sendWelcome(customer._id, conversation._id, recipient);
       return;
     }
     if (
@@ -197,11 +294,17 @@ export class AutomationService {
   private async sendWelcome(customerId: Types.ObjectId, conversationId: Types.ObjectId, to: string): Promise<void> {
     const settings = await WorkspaceSettings.findOne({ key: 'workspace' }).select('welcomeMessage').lean();
     const body = settings?.welcomeMessage ?? DEFAULT_WELCOME_MESSAGE;
-    await this.sendTracked(customerId, conversationId, 'INTERACTIVE', { text: body }, () =>
-      whatsappService.sendButtons(to, body, [
-        { id: 'explore_products', title: 'Explore Our Products' },
-        { id: 'connect_sales', title: 'Connect With Team' },
-      ]),
+    const buttons = [
+      { id: 'explore_products', title: 'Explore Our Products' },
+      { id: 'connect_sales', title: 'Connect With Team' },
+    ];
+    await this.sendTracked(
+      customerId,
+      conversationId,
+      'IMAGE',
+      { imageUrl: WELCOME_IMAGE_URL },
+      () => whatsappService.sendImage(to, WELCOME_IMAGE_URL),
+      { type: 'WELCOME_OPTIONS', body, buttons },
     );
     await Conversation.updateOne({ _id: conversationId }, { $set: { currentStep: 'WELCOME_SENT' } });
   }
@@ -215,7 +318,7 @@ export class AutomationService {
     occurredAt: Date,
   ): Promise<void> {
     if (id === 'explore_products') {
-      await this.sendProducts(undefined, customerId, conversation._id, to, 0);
+      await this.sendProducts(undefined, customerId, conversation._id, to);
       return;
     }
     if (id.startsWith('category_page:')) {
@@ -228,14 +331,7 @@ export class AutomationService {
     }
     if (id.startsWith('category:')) {
       const category = decodeURIComponent(id.slice('category:'.length));
-      await this.sendProducts(category, customerId, conversation._id, to, 0);
-      return;
-    }
-    if (id.startsWith('product_page:')) {
-      const parts = id.split(':');
-      const page = Number(parts.at(-1)) || 0;
-      const category = parts.length > 2 ? decodeURIComponent(parts.slice(1, -1).join(':')) : undefined;
-      await this.sendProducts(category, customerId, conversation._id, to, page);
+      await this.sendProducts(category, customerId, conversation._id, to);
       return;
     }
     if (id.startsWith('product:')) {
@@ -243,7 +339,7 @@ export class AutomationService {
       return;
     }
     if (id === 'another_product') {
-      await this.sendProducts(undefined, customerId, conversation._id, to, 0);
+      await this.sendProducts(undefined, customerId, conversation._id, to);
       return;
     }
     const body = 'Sorry, I could not match that selection. Please choose an option.';
@@ -286,15 +382,12 @@ export class AutomationService {
     customerId: Types.ObjectId,
     conversationId: Types.ObjectId,
     to: string,
-    page: number,
   ): Promise<void> {
     const filter: Record<string, unknown> = { isActive: true };
     if (category) filter.category = new RegExp(`^${category.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
     const products = await Product.find(filter)
-      .select('name description category')
+      .select('name description category whatsappProductRetailerId')
       .sort({ category: 1, name: 1 })
-      .skip(Math.max(0, page) * 9)
-      .limit(10)
       .lean();
     if (products.length === 0) {
       const body = category
@@ -305,40 +398,79 @@ export class AutomationService {
       );
       return;
     }
-    const rows: Array<{ id: string; title: string; description?: string }> = products.slice(0, 9).map((product) => ({
+    const rows: Array<{ id: string; title: string; description?: string }> = products.map((product) => ({
       id: `product:${product._id}`,
       title: product.name.slice(0, 24),
-      description: `${product.category} · ${product.description}`.slice(0, 72),
+      description: shortProductDescription(product.description),
     }));
-    if (products.length > 9)
-      rows.push({
-        id: category
-          ? `product_page:${encodeURIComponent(category)}:${page + 1}`
-          : `product_page:${page + 1}`,
-        title: 'More Products',
-      });
-    const body = category
-      ? `Select a ${category} product below to receive its photo, description, and specifications.`
-      : 'See the catalogue image above, then choose a product below to receive its photo, description, and specifications.';
+    const body = firstCatalogueBody(category, products.length);
     await Conversation.updateOne({ _id: conversationId }, { $set: { currentStep: 'PRODUCT_MENU' } });
-    if (page === 0) {
-      await this.sendTracked(customerId, conversationId, 'IMAGE', { imageUrl: PRODUCT_CATALOGUE_IMAGE_URL }, () =>
-        whatsappService.sendImage(to, PRODUCT_CATALOGUE_IMAGE_URL),
+    const catalogId = env.WHATSAPP_CATALOG_ID;
+    const mappedProducts = products.flatMap((product) => {
+      const retailerId = product.whatsappProductRetailerId?.trim();
+      return retailerId ? [{ product, retailerId }] : [];
+    });
+    const hasCatalogMapping = products.length <= 30 && mappedProducts.length === products.length;
+    if (catalogId && hasCatalogMapping) {
+      const sectionTitle = category
+        ? (PRODUCT_CATEGORY_TITLES[category] ?? category).slice(0, 24)
+        : 'Available products';
+      const productItems = mappedProducts.map(({ retailerId }) => ({ product_retailer_id: retailerId }));
+      const productIds = productItems.slice(0, 10).map(({ product_retailer_id }) => product_retailer_id);
+      const remainingProductIds = productItems.slice(10).map(({ product_retailer_id }) => product_retailer_id);
+      await this.sendTracked(
+        customerId,
+        conversationId,
+        'IMAGE',
+        { imageUrl: PRODUCT_CATALOGUE_IMAGE_URL },
+        () => whatsappService.sendImage(to, PRODUCT_CATALOGUE_IMAGE_URL),
+        {
+          type: 'PRODUCT_CATALOG',
+          catalogId,
+          header: 'N-CUT Products',
+          body,
+          sectionTitle,
+          productIds,
+          remainingProductIds,
+        },
+      );
+      return;
+    }
+    if (catalogId) {
+      logger.warn(
+        {
+          catalogId,
+          productCount: products.length,
+          unmappedProductCount: products.filter((product) => !product.whatsappProductRetailerId?.trim()).length,
+        },
+        'Meta catalog is configured but products are missing retailer IDs or exceed the multi-product limit; using legacy product lists',
       );
     }
+    const sections = [
+      {
+        title: category ? (PRODUCT_CATEGORY_TITLES[category] ?? category).slice(0, 24) : 'Available products',
+        rows: rows.slice(0, 10),
+      },
+    ];
+    const content = {
+      text: body,
+      ...(category ? { category } : {}),
+      products: products.map(({ _id, name, category }) => ({ id: _id, name, category })),
+    };
     await this.sendTracked(
       customerId,
       conversationId,
-      'INTERACTIVE',
+      'IMAGE',
+      { imageUrl: PRODUCT_CATALOGUE_IMAGE_URL },
+      () => whatsappService.sendImage(to, PRODUCT_CATALOGUE_IMAGE_URL),
       {
-        text: body,
-        ...(category ? { category } : {}),
-        products: products.map(({ _id, name, category }) => ({ id: _id, name, category })),
+        type: 'PRODUCT_MENU',
+        body,
+        buttonText: 'View products',
+        sections,
+        content,
+        remainingRows: rows.slice(10),
       },
-      () =>
-        whatsappService.sendList(to, body, 'View products', [
-          { title: category ? (PRODUCT_CATEGORY_TITLES[category] ?? category).slice(0, 24) : 'Available products', rows },
-        ]),
     );
   }
 
@@ -373,88 +505,289 @@ export class AutomationService {
       },
     );
     const updatedConversation = await Conversation.findById(conversation._id).select('uniqueProductCount');
-    const specificationLines = Object.entries(product.specifications ?? {}).map(
-      ([key, value]) => `${key}: ${String(value)}`,
-    );
+    const description = product.description.trim();
+    const specificationLines = Object.entries(product.specifications ?? []).flatMap(([key, value]) => {
+      if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') return [];
+      const normalizedValue = String(value).trim();
+      return normalizedValue ? [`${key}: ${normalizedValue}`] : [];
+    });
     const details = [
       product.name,
-      product.description,
+      description,
       ...(specificationLines.length ? [`Specifications:\n${specificationLines.join('\n')}`] : []),
       ...(product.sizes.length ? [`Sizes: ${product.sizes.join(', ')}`] : []),
       ...(product.grits.length ? [`Grits: ${product.grits.join(', ')}`] : []),
       ...(product.colours.length ? [`Colours: ${product.colours.join(', ')}`] : []),
       ...(product.backing.length ? [`Backing: ${product.backing.join(', ')}`] : []),
-    ].join('\n\n');
+    ]
+      .filter(Boolean)
+      .join('\n\n');
     const imageUrl = product.imageUrl;
+    const uniqueProductCount =
+      updatedConversation?.uniqueProductCount ?? conversation.selectedProductIds.length + Number(update.modifiedCount > 0);
     if (imageUrl) {
       await this.sendTracked(
         customerId,
         conversation._id,
         'IMAGE',
-        { imageUrl: product.imageUrl, caption: product.name },
-        () => whatsappService.sendImage(to, imageUrl, product.name),
+        { imageUrl: product.imageUrl },
+        () => whatsappService.sendImage(to, imageUrl),
+        { type: 'PRODUCT_DETAILS', details, productId: String(product._id), uniqueProductCount },
       );
+      logger.debug({ productId, uniqueSelection: Boolean(update.modifiedCount) }, 'Product selection processed');
+      return;
     }
-    await this.sendTracked(customerId, conversation._id, 'TEXT', { text: details, productId: product._id }, () =>
-      whatsappService.sendText(to, details),
-    );
-    const nextBody = 'What would you like to do next?';
-    await this.sendTracked(customerId, conversation._id, 'INTERACTIVE', { text: nextBody }, () =>
-      whatsappService.sendList(to, nextBody, 'Next steps', [
-        {
-          title: 'Continue',
-          rows: [
-            { id: 'another_product', title: 'Explore Another Product' },
-            { id: 'connect_sales', title: 'Connect With Our Team' },
-          ],
-        },
-      ]),
-    );
+    await this.sendProductDetails(customerId, conversation._id, to, details, productId, uniqueProductCount);
+    logger.debug({ productId, uniqueSelection: Boolean(update.modifiedCount) }, 'Product selection processed');
+  }
 
-    if (updatedConversation && updatedConversation.uniqueProductCount >= 3) {
+  private async sendProductDetails(
+    customerId: Types.ObjectId,
+    conversationId: Types.ObjectId,
+    to: string,
+    details: string,
+    productId: string,
+    uniqueProductCount: number,
+  ): Promise<void> {
+    await this.sendTracked(
+      customerId,
+      conversationId,
+      'TEXT',
+      { text: details, productId },
+      () => whatsappService.sendText(to, details),
+      { type: 'PRODUCT_NEXT_STEPS', uniqueProductCount },
+    );
+  }
+
+  private async sendProductMenuList(
+    customerId: Types.ObjectId,
+    conversationId: Types.ObjectId,
+    to: string,
+    action: Extract<DeliveryAction, { type: 'PRODUCT_MENU' }>,
+  ): Promise<void> {
+    const remainingRows = action.remainingRows ?? [];
+    const nextRows = remainingRows.slice(0, 10);
+    const followup: DeliveryAction | undefined = nextRows.length
+      ? {
+          ...action,
+          body: remainingCatalogueBody(nextRows.length),
+          sections: [{ title: action.sections[0]?.title ?? 'Available products', rows: nextRows }],
+          remainingRows: remainingRows.slice(nextRows.length),
+        }
+      : undefined;
+
+    await this.sendTracked(
+      customerId,
+      conversationId,
+      'INTERACTIVE',
+      action.content,
+      () => whatsappService.sendList(to, action.body, action.buttonText, action.sections),
+      followup,
+    );
+  }
+
+  private async sendNextProductCatalogList(
+    customerId: Types.ObjectId,
+    conversationId: Types.ObjectId,
+    to: string,
+    action: Extract<DeliveryAction, { type: 'PRODUCT_CATALOG' }>,
+  ): Promise<void> {
+    const nextProductIds = action.productIds;
+    const remainingProductIds = action.remainingProductIds;
+    const content = {
+      text: action.body,
+      catalogId: action.catalogId,
+      products: nextProductIds.map((retailerId) => ({ retailerId })),
+    };
+    const followup: DeliveryAction | undefined = remainingProductIds.length
+      ? {
+          ...action,
+          body: remainingCatalogueBody(Math.min(10, remainingProductIds.length)),
+          productIds: remainingProductIds.slice(0, 10),
+          remainingProductIds: remainingProductIds.slice(10),
+        }
+      : undefined;
+
+    await this.sendTracked(
+      customerId,
+      conversationId,
+      'INTERACTIVE',
+      content,
+      () =>
+        whatsappService.sendProductList(to, action.catalogId, action.header, action.body, [
+          {
+            title: action.sectionTitle,
+            product_items: nextProductIds.map((product_retailer_id) => ({ product_retailer_id })),
+          },
+        ]),
+      followup,
+    );
+  }
+
+  private async sendProductNextSteps(
+    customerId: Types.ObjectId,
+    conversationId: Types.ObjectId,
+    to: string,
+    uniqueProductCount: number,
+  ): Promise<void> {
+    const nextBody = 'What would you like to do next?';
+    let deliveryAction: DeliveryAction | undefined;
+    if (uniqueProductCount >= 3) {
       await Conversation.updateOne(
-        { _id: conversation._id, interestTriggeredAt: { $exists: false } },
+        { _id: conversationId, interestTriggeredAt: { $exists: false } },
         {
           $set: { interestTriggeredAt: new Date(), interestPromptStatus: 'PENDING', currentStep: 'INTEREST_TRIGGERED' },
         },
       );
-      const staleLock = new Date(Date.now() - 5 * 60 * 1000);
-      const prompt = await Conversation.findOneAndUpdate(
-        {
-          _id: conversation._id,
-          $or: [
-            { interestPromptStatus: 'PENDING' },
-            { interestPromptStatus: 'SENDING', interestPromptLockedAt: { $lt: staleLock } },
-          ],
-        },
-        { $set: { interestPromptStatus: 'SENDING', interestPromptLockedAt: new Date() } },
-        { new: true },
-      );
-      if (prompt) {
-        const body =
-          'Thank you for exploring our products!\n\nWe would be happy to understand your requirements and help you select the right solution.\n\nWould you like to connect with our sales team?';
-        try {
-          await this.sendTracked(
-            customerId,
-            conversation._id,
-            'INTERACTIVE',
-            { text: body, type: 'third-product-interest-trigger' },
-            () => whatsappService.sendButtons(to, body, [{ id: 'connect_sales', title: 'Connect With Team' }]),
-          );
-          await Conversation.updateOne(
-            { _id: conversation._id, interestPromptStatus: 'SENDING' },
-            { $set: { interestPromptStatus: 'SENT' }, $unset: { interestPromptLockedAt: 1 } },
-          );
-        } catch (error) {
-          await Conversation.updateOne(
-            { _id: conversation._id, interestPromptStatus: 'SENDING' },
-            { $set: { interestPromptStatus: 'PENDING' }, $unset: { interestPromptLockedAt: 1 } },
-          );
-          throw error;
-        }
-      }
+      const conversation = await Conversation.findById(conversationId).select('interestPromptStatus').lean();
+      if (conversation?.interestPromptStatus !== 'SENT') deliveryAction = { type: 'THIRD_PRODUCT_INTEREST' };
     }
-    logger.debug({ productId, uniqueSelection: Boolean(update.modifiedCount) }, 'Product selection processed');
+
+    await this.sendTracked(
+      customerId,
+      conversationId,
+      'INTERACTIVE',
+      { text: nextBody },
+      () =>
+        whatsappService.sendList(to, nextBody, 'Next steps', [
+          {
+            title: 'Continue',
+            rows: [
+              { id: 'another_product', title: 'Explore Another Product' },
+              { id: 'connect_sales', title: 'Connect With Our Team' },
+            ],
+          },
+        ]),
+      deliveryAction,
+    );
+  }
+
+  private async sendThirdProductInterest(
+    customerId: Types.ObjectId,
+    conversationId: Types.ObjectId,
+    to: string,
+  ): Promise<void> {
+    const staleLock = new Date(Date.now() - 5 * 60 * 1000);
+    const prompt = await Conversation.findOneAndUpdate(
+      {
+        _id: conversationId,
+        $or: [
+          { interestPromptStatus: 'PENDING' },
+          { interestPromptStatus: 'SENDING', interestPromptLockedAt: { $lt: staleLock } },
+        ],
+      },
+      { $set: { interestPromptStatus: 'SENDING', interestPromptLockedAt: new Date() } },
+      { new: true },
+    );
+    if (!prompt) return;
+
+    const body =
+      'Thank you for exploring our products!\n\nWe would be happy to understand your requirements and help you select the right solution.\n\nWould you like to connect with our sales team?';
+    try {
+      await this.sendTracked(
+        customerId,
+        conversationId,
+        'INTERACTIVE',
+        { text: body, type: 'third-product-interest-trigger' },
+        () => whatsappService.sendButtons(to, body, [{ id: 'connect_sales', title: 'Connect With Team' }]),
+      );
+      await Conversation.updateOne(
+        { _id: conversationId, interestPromptStatus: 'SENDING' },
+        { $set: { interestPromptStatus: 'SENT' }, $unset: { interestPromptLockedAt: 1 } },
+      );
+    } catch (error) {
+      await Conversation.updateOne(
+        { _id: conversationId, interestPromptStatus: 'SENDING' },
+        { $set: { interestPromptStatus: 'PENDING' }, $unset: { interestPromptLockedAt: 1 } },
+      );
+      throw error;
+    }
+  }
+
+  async continueAfterDelivery(whatsappMessageId: string): Promise<void> {
+    const staleLock = new Date(Date.now() - 5 * 60 * 1000);
+    const message = await Message.findOneAndUpdate(
+      {
+        whatsappMessageId,
+        status: { $in: ['DELIVERED', 'READ'] },
+        $or: [
+          { deliveryActionStatus: 'PENDING' },
+          { deliveryActionStatus: 'SENDING', deliveryActionLockedAt: { $lt: staleLock } },
+        ],
+      },
+      { $set: { deliveryActionStatus: 'SENDING', deliveryActionLockedAt: new Date() } },
+      { new: true },
+    );
+    if (!message) return;
+
+    if (!isDeliveryAction(message.deliveryAction)) {
+      await Message.updateOne(
+        { _id: message._id, deliveryActionStatus: 'SENDING' },
+        { $set: { deliveryActionStatus: 'FAILED' }, $unset: { deliveryActionLockedAt: 1 } },
+      );
+      throw new Error(`Invalid delivery action for WhatsApp message ${whatsappMessageId}`);
+    }
+
+    try {
+      const customer = await Customer.findById(message.customerId).select('phoneNumber whatsappId');
+      const to = customer?.phoneNumber || customer?.whatsappId;
+      if (!customer || !to) throw new Error(`Cannot resolve recipient for WhatsApp message ${whatsappMessageId}`);
+      const conversation = await Conversation.findById(message.conversationId).select('status').lean();
+      if (conversation?.status !== 'OPEN') {
+        await Message.updateOne(
+          { _id: message._id, deliveryActionStatus: 'SENDING' },
+          {
+            $set: { deliveryActionStatus: 'SENT' },
+            $unset: { deliveryAction: 1, deliveryActionLockedAt: 1 },
+          },
+        );
+        return;
+      }
+
+      const action = message.deliveryAction;
+      if (action.type === 'WELCOME_OPTIONS') {
+        await this.sendTracked(message.customerId, message.conversationId, 'INTERACTIVE', {
+          text: action.body,
+          buttons: action.buttons,
+        }, () => whatsappService.sendButtons(to, action.body, action.buttons));
+      } else if (action.type === 'PRODUCT_MENU') {
+        await this.sendProductMenuList(message.customerId, message.conversationId, to, action);
+      } else if (action.type === 'PRODUCT_CATALOG') {
+        await this.sendNextProductCatalogList(message.customerId, message.conversationId, to, action);
+      } else if (action.type === 'PRODUCT_DETAILS') {
+        await this.sendProductDetails(
+          message.customerId,
+          message.conversationId,
+          to,
+          action.details,
+          action.productId,
+          action.uniqueProductCount,
+        );
+      } else if (action.type === 'PRODUCT_NEXT_STEPS') {
+        await this.sendProductNextSteps(
+          message.customerId,
+          message.conversationId,
+          to,
+          action.uniqueProductCount,
+        );
+      } else {
+        await this.sendThirdProductInterest(message.customerId, message.conversationId, to);
+      }
+
+      await Message.updateOne(
+        { _id: message._id, deliveryActionStatus: 'SENDING' },
+        {
+          $set: { deliveryActionStatus: 'SENT' },
+          $unset: { deliveryAction: 1, deliveryActionLockedAt: 1 },
+        },
+      );
+    } catch (error) {
+      await Message.updateOne(
+        { _id: message._id, deliveryActionStatus: 'SENDING' },
+        { $set: { deliveryActionStatus: 'PENDING' }, $unset: { deliveryActionLockedAt: 1 } },
+      );
+      throw error;
+    }
   }
 
   private async handover(
@@ -492,6 +825,7 @@ export class AutomationService {
               occurredAt,
             },
           },
+          $set: { requirement: lead.requirement?.trim() || SALES_FOLLOW_UP_REQUIREMENT },
           $unset: { adminReadAt: 1 },
         },
         { new: true },
@@ -506,6 +840,7 @@ export class AutomationService {
             conversationHistory: [conversationId],
             visitHistory: [{ whatsappMessageId: inboundMessageId, conversationId, occurredAt }],
             selectedProducts: conversation.selectedProductIds,
+            requirement: SALES_FOLLOW_UP_REQUIREMENT,
             status: 'NEW',
           },
         },
@@ -548,6 +883,7 @@ export class AutomationService {
     messageType: 'TEXT' | 'IMAGE' | 'INTERACTIVE' | 'TEMPLATE',
     content: Record<string, unknown>,
     send: () => Promise<string>,
+    deliveryAction?: DeliveryAction,
   ): Promise<void> {
     const whatsappMessageId = await send();
     await Message.create({
@@ -558,6 +894,7 @@ export class AutomationService {
       messageType,
       content,
       status: 'SENT',
+      ...(deliveryAction ? { deliveryAction, deliveryActionStatus: 'PENDING' } : {}),
       timestamp: new Date(),
     });
   }

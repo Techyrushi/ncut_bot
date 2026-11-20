@@ -18,6 +18,7 @@ const schema = z
     WHATSAPP_ACCESS_TOKEN: optionalSecret,
     WHATSAPP_PHONE_NUMBER_ID: optionalSecret,
     WHATSAPP_BUSINESS_ACCOUNT_ID: optionalSecret,
+    WHATSAPP_CATALOG_ID: z.string().trim().optional().default(''),
     WHATSAPP_APP_SECRET: optionalSecret,
     WHATSAPP_VERIFY_TOKEN: optionalSecret,
     META_GRAPH_API_VERSION: z

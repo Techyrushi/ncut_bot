@@ -83,6 +83,7 @@ it('preserves product fields omitted from an update and rejects empty updates', 
     grits: ['P60'],
     backing: ['cloth'],
     specifications: { material: 'Verified' },
+    whatsappProductRetailerId: 'ncut-verified-disc',
     isActive: false,
   });
 
@@ -97,6 +98,7 @@ it('preserves product fields omitted from an update and rejects empty updates', 
   expect(update.body.data.grits).toEqual(['P60']);
   expect(update.body.data.backing).toEqual(['cloth']);
   expect(update.body.data.specifications).toEqual({ material: 'Verified' });
+  expect(update.body.data.whatsappProductRetailerId).toBe('ncut-verified-disc');
   expect(update.body.data.isActive).toBe(false);
 
   const emptyUpdate = await request(app)
@@ -196,9 +198,11 @@ it('uploads only image data and accepts documented product category names', asyn
       slug: 'backup-pad',
       description: 'Verified product details',
       category: 'Velcro & PSA Backup Pads',
+      whatsappProductRetailerId: 'backup-pad-meta-id',
     });
   expect(product.status).toBe(201);
   expect(product.body.data.category).toBe('Velcro & PSA Backup Pads');
+  expect(product.body.data.whatsappProductRetailerId).toBe('backup-pad-meta-id');
   const categories = await request(app)
     .get('/api/v1/products/categories')
     .set('authorization', `Bearer ${token}`);
@@ -650,6 +654,7 @@ it('returns one lead per mobile number with chat history and unread activity', a
   expect(result.body.data.items[0]).toMatchObject({
     isUnreadLead: true,
     chatHistoryCount: 2,
+    requirement: 'Customer asked to connect with the sales team',
     latestConversationId: aliasConversation!.id,
     leadHistory: expect.arrayContaining([
       expect.objectContaining({ conversationId: olderConversation!.id }),
@@ -710,6 +715,58 @@ it('filters and searches customer records with pagination metadata', async () =>
     .query({ optInStatus: 'INVALID' })
     .set('authorization', `Bearer ${token}`);
   expect(invalidFilter.status).toBe(400);
+});
+
+it('updates consent for selected customers in one validated bulk operation', async () => {
+  const admin = await User.create({
+    email: 'admin@example.com',
+    name: 'Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const token = jwt.sign({ role: admin.role, ver: admin.authVersion ?? 0 }, env.JWT_SECRET, {
+    subject: admin.id,
+    jwtid: randomUUID(),
+    expiresIn: '1h',
+  });
+  const [first, second, untouched] = await Customer.create([
+    { whatsappId: '15550001001', optInStatus: 'UNKNOWN' },
+    { whatsappId: '15550001002', optInStatus: 'UNKNOWN' },
+    { whatsappId: '15550001003', optInStatus: 'UNKNOWN' },
+  ]);
+  const optedIn = await request(app)
+    .patch('/api/v1/customers/opt-in/bulk')
+    .set('authorization', `Bearer ${token}`)
+    .send({
+      ids: [first!.id, second!.id, first!.id],
+      status: 'OPTED_IN',
+      source: 'Admin verified consent records',
+    });
+  expect(optedIn.status).toBe(200);
+  expect(optedIn.body.data).toMatchObject({ matchedCount: 2, updatedCount: 2 });
+  const firstAfterOptIn = await Customer.findById(first!._id);
+  expect(firstAfterOptIn?.optInStatus).toBe('OPTED_IN');
+  expect(firstAfterOptIn?.optInAt).toBeInstanceOf(Date);
+  expect(firstAfterOptIn?.optInSource).toBe('Admin verified consent records');
+
+  const optedOut = await request(app)
+    .patch('/api/v1/customers/opt-in/bulk')
+    .set('authorization', `Bearer ${token}`)
+    .send({
+      ids: [first!.id, second!.id],
+      status: 'OPTED_OUT',
+      source: 'Customer requested opt-out',
+    });
+  expect(optedOut.status).toBe(200);
+  expect((await Customer.findById(first!._id))?.optInAt).toBeUndefined();
+  expect((await Customer.findById(first!._id))?.optInStatus).toBe('OPTED_OUT');
+  expect((await Customer.findById(untouched!._id))?.optInStatus).toBe('UNKNOWN');
+
+  const invalid = await request(app)
+    .patch('/api/v1/customers/opt-in/bulk')
+    .set('authorization', `Bearer ${token}`)
+    .send({ ids: ['invalid'], status: 'OPTED_IN', source: 'Verified' });
+  expect(invalid.status).toBe(400);
 });
 
 it('allows admins to delete a customer and all linked conversations and campaign history', async () => {
@@ -1086,7 +1143,7 @@ it('clears activity history through the admin-only logs endpoint', async () => {
   expect(await ActivityLog.countDocuments({ action: { $in: ['OLD_SYSTEM_EVENT', 'OLD_USER_EVENT'] } })).toBe(0);
 });
 
-it('deletes only unsent campaign previews and retains sent campaign history', async () => {
+it('deletes campaigns in every status, waits for in-flight sends, and retains sent messages', async () => {
   const admin = await User.create({
     email: 'admin@example.com',
     name: 'Admin',
@@ -1098,10 +1155,19 @@ it('deletes only unsent campaign previews and retains sent campaign history', as
     jwtid: randomUUID(),
     expiresIn: '1h',
   });
-  const [preview, sent] = await BulkCampaign.create([
+  const [draft, preview, queued, completed, processing] = await BulkCampaign.create([
+    { name: 'Draft campaign', createdBy: admin._id, status: 'DRAFT' },
     { name: 'Unsent preview', createdBy: admin._id, status: 'READY' },
-    { name: 'Sent campaign', createdBy: admin._id, status: 'COMPLETED' },
+    { name: 'Queued campaign', createdBy: admin._id, status: 'QUEUED' },
+    { name: 'Completed campaign', createdBy: admin._id, status: 'COMPLETED' },
+    { name: 'Active campaign', createdBy: admin._id, status: 'PROCESSING' },
   ]);
+  const draftDeleted = await request(app)
+    .delete(`/api/v1/bulk-campaigns/${draft!._id}`)
+    .set('authorization', `Bearer ${token}`);
+  expect(draftDeleted.status).toBe(200);
+  expect(await BulkCampaign.findById(draft!._id)).toBeNull();
+
   const previewRecipient = await BulkCampaignRecipient.create({
     campaignId: preview!._id,
     recipientKey: '15550006661',
@@ -1110,28 +1176,99 @@ it('deletes only unsent campaign previews and retains sent campaign history', as
     status: 'UNSENT',
   });
   const sentRecipient = await BulkCampaignRecipient.create({
-    campaignId: sent!._id,
+    campaignId: completed!._id,
     recipientKey: '15550006662',
     phoneNumber: '15550006662',
     sourceRow: 2,
     status: 'DELIVERED',
+  });
+  const customer = await Customer.create({ whatsappId: '15550006662', phoneNumber: '15550006662' });
+  const conversation = await Conversation.create({ customerId: customer._id, status: 'OPEN' });
+  const sentMessage = await Message.create({
+    customerId: customer._id,
+    conversationId: conversation._id,
+    whatsappMessageId: 'wamid.completed.campaign',
+    bulkCampaignId: completed!._id,
+    bulkRecipientId: sentRecipient._id,
+    direction: 'OUTBOUND',
+    messageType: 'TEXT',
+    content: { text: 'Completed campaign message' },
+    status: 'DELIVERED',
+    timestamp: new Date(),
+  });
+  const queuedRecipient = await BulkCampaignRecipient.create({
+    campaignId: queued!._id,
+    recipientKey: '15550006663',
+    phoneNumber: '15550006663',
+    sourceRow: 2,
+    status: 'QUEUED',
+  });
+  const inFlightRecipient = await BulkCampaignRecipient.create({
+    campaignId: processing!._id,
+    recipientKey: '15550006664',
+    phoneNumber: '15550006664',
+    sourceRow: 2,
+    status: 'SENDING',
   });
 
   const deleted = await request(app)
     .delete(`/api/v1/bulk-campaigns/${preview!._id}`)
     .set('authorization', `Bearer ${token}`);
   expect(deleted.status).toBe(200);
-  expect(deleted.body.data.deletedRecipients).toBe(1);
   expect(await BulkCampaign.findById(preview!._id)).toBeNull();
   expect(await BulkCampaignRecipient.findById(previewRecipient._id)).toBeNull();
 
-  const protectedHistory = await request(app)
-    .delete(`/api/v1/bulk-campaigns/${sent!._id}`)
+  const deletedQueued = await request(app)
+    .delete(`/api/v1/bulk-campaigns/${queued!._id}`)
     .set('authorization', `Bearer ${token}`);
-  expect(protectedHistory.status).toBe(409);
-  expect(protectedHistory.body.error.code).toBe('CAMPAIGN_HISTORY_PROTECTED');
-  expect(await BulkCampaign.findById(sent!._id)).not.toBeNull();
-  expect(await BulkCampaignRecipient.findById(sentRecipient._id)).not.toBeNull();
+  expect(deletedQueued.status).toBe(200);
+  expect(await BulkCampaign.findById(queued!._id)).toBeNull();
+  expect(await BulkCampaignRecipient.findById(queuedRecipient._id)).toBeNull();
+
+  const deletedCompleted = await request(app)
+    .delete(`/api/v1/bulk-campaigns/${completed!._id}`)
+    .set('authorization', `Bearer ${token}`);
+  expect(deletedCompleted.status).toBe(200);
+  expect(await BulkCampaign.findById(completed!._id)).toBeNull();
+  expect(await BulkCampaignRecipient.findById(sentRecipient._id)).toBeNull();
+  const retainedMessage = await Message.findById(sentMessage._id).lean();
+  expect(retainedMessage).toMatchObject({
+    status: 'DELIVERED',
+    content: { text: 'Completed campaign message' },
+  });
+  expect(retainedMessage?.bulkCampaignId).toBeUndefined();
+  expect(retainedMessage?.bulkRecipientId).toBeUndefined();
+
+  const pendingDelete = await request(app)
+    .delete(`/api/v1/bulk-campaigns/${processing!._id}`)
+    .set('authorization', `Bearer ${token}`);
+  expect(pendingDelete.status).toBe(202);
+  expect(pendingDelete.body.data.deletionPending).toBe(true);
+  expect((await BulkCampaign.findById(processing!._id))?.status).toBe('CANCELLED');
+  expect(await BulkCampaignRecipient.findById(inFlightRecipient._id)).not.toBeNull();
+  const inFlightMessage = await Message.create({
+    customerId: customer._id,
+    conversationId: conversation._id,
+    whatsappMessageId: 'wamid.processing.campaign',
+    bulkCampaignId: processing!._id,
+    bulkRecipientId: inFlightRecipient._id,
+    direction: 'OUTBOUND',
+    messageType: 'TEXT',
+    content: { text: 'In-flight campaign message' },
+    status: 'SENT',
+    timestamp: new Date(),
+  });
+  await BulkCampaignRecipient.updateOne(
+    { _id: inFlightRecipient._id },
+    { $set: { status: 'SENT', whatsappMessageId: inFlightMessage.whatsappMessageId } },
+  );
+  await processBulkCampaignQueue();
+  expect(await BulkCampaign.findById(processing!._id)).toBeNull();
+  expect(await BulkCampaignRecipient.findById(inFlightRecipient._id)).toBeNull();
+  const retainedInFlightMessage = await Message.findById(inFlightMessage._id).lean();
+  expect(retainedInFlightMessage?.status).toBe('SENT');
+  expect(retainedInFlightMessage?.bulkCampaignId).toBeUndefined();
+  expect(retainedInFlightMessage?.bulkRecipientId).toBeUndefined();
 });
 
 afterAll(async () => {

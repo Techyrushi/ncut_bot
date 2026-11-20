@@ -1034,6 +1034,7 @@ export function ConversationsPage() {
                 const imageUrl = messageImageUrl(message.content);
                 const videoUrl = messageMediaUrl(message.content, 'video');
                 const document = messageDocument(message.content);
+                const buttons = messageButtons(message.content);
                 return (
                   <article className={`message-bubble ${outbound ? 'outbound' : ''}`} key={message._id}>
                     {imageUrl && <img className="message-attachment" src={imageUrl} alt="Shared image" />}
@@ -1044,6 +1045,13 @@ export function ConversationsPage() {
                       </a>
                     )}
                     <div>{messageText(message.content)}</div>
+                    {buttons.length > 0 && (
+                      <div className="message-reply-options" aria-label="WhatsApp reply options">
+                        {buttons.map((button) => (
+                          <span key={button.id}>{button.title}</span>
+                        ))}
+                      </div>
+                    )}
                     <small>
                       {outbound ? 'You' : display(selected?.customerId)} · {formatDate(message.timestamp)}
                       {outbound && (
@@ -1296,6 +1304,17 @@ function messageText(value: unknown): string {
   }
   if (typeof record.type === 'string') return record.type.replace(/-/g, ' ');
   return 'Interactive message';
+}
+function messageButtons(value: unknown): Array<{ id: string; title: string }> {
+  if (!value || typeof value !== 'object') return [];
+  const buttons = (value as Record<string, unknown>).buttons;
+  if (!Array.isArray(buttons)) return [];
+  return buttons.flatMap((button) => {
+    if (!button || typeof button !== 'object') return [];
+    const record = button as Record<string, unknown>;
+    if (typeof record.title !== 'string') return [];
+    return [{ id: typeof record.id === 'string' ? record.id : record.title, title: record.title }];
+  });
 }
 function messageImageUrl(value: unknown): string {
   if (!value || typeof value !== 'object') return '';

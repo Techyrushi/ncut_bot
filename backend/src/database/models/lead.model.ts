@@ -1,5 +1,7 @@
 import { model, Schema, type InferSchemaType } from 'mongoose';
 
+export const SALES_FOLLOW_UP_REQUIREMENT = 'Customer asked to connect with the sales team';
+
 const leadSchema = new Schema(
   {
     customerId: { type: Schema.Types.ObjectId, ref: 'Customer', required: true, index: true },

@@ -28,6 +28,7 @@ type ProductDraft = {
   category: string;
   description: string;
   imageUrl: string;
+  whatsappProductRetailerId: string;
   sizes: string;
   grits: string;
   colours: string;
@@ -42,12 +43,38 @@ const emptyDraft: ProductDraft = {
   category: '',
   description: '',
   imageUrl: '',
+  whatsappProductRetailerId: '',
   sizes: '',
   grits: '',
   colours: '',
   backing: '',
   specifications: '',
 };
+
+async function optimizeProductImage(file: File): Promise<File> {
+  if (file.size <= 512 * 1024) return file;
+
+  const image = await createImageBitmap(file);
+  try {
+    const scale = Math.min(1, 1600 / Math.max(image.width, image.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(image.width * scale));
+    canvas.height = Math.max(1, Math.round(image.height * scale));
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Your browser could not prepare the product image.');
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.86));
+    if (!blob) throw new Error('Your browser could not compress the product image.');
+    if (blob.size >= file.size) return file;
+    const filename = file.name.replace(/\.[^.]+$/, '');
+    return new File([blob], `${filename}.jpg`, { type: 'image/jpeg' });
+  } finally {
+    image.close();
+  }
+}
 
 export function ProductsPage() {
   const client = useQueryClient();
@@ -128,7 +155,7 @@ export function ProductsPage() {
             (!categoryFilter || body.category === categoryFilter) &&
             matchesStatus &&
             (!search.trim() ||
-              `${body.name} ${body.slug} ${body.category} ${body.description}`
+            `${body.name} ${body.slug} ${body.category} ${body.description} ${body.whatsappProductRetailerId ?? ''}`
                 .toLowerCase()
                 .includes(search.trim().toLowerCase()));
           const alreadyListed = current.items.some((product) => product._id === id);
@@ -147,7 +174,7 @@ export function ProductsPage() {
           (statusFilter === 'all' || statusFilter === 'active') &&
           (!categoryFilter || body.category === categoryFilter) &&
           (!search.trim() ||
-            `${body.name} ${body.slug} ${body.category} ${body.description}`
+            `${body.name} ${body.slug} ${body.category} ${body.description} ${body.whatsappProductRetailerId ?? ''}`
               .toLowerCase()
               .includes(search.trim().toLowerCase()));
         return matchesFilters
@@ -214,6 +241,7 @@ export function ProductsPage() {
       category: draft.category,
       description: draft.description.trim(),
       imageUrl: draft.imageUrl,
+      whatsappProductRetailerId: draft.whatsappProductRetailerId.trim(),
       sizes: splitValues(draft.sizes),
       grits: splitValues(draft.grits),
       colours: splitValues(draft.colours),
@@ -230,6 +258,7 @@ export function ProductsPage() {
       category: product.category,
       description: product.description,
       imageUrl: product.imageUrl ?? '',
+      whatsappProductRetailerId: product.whatsappProductRetailerId ?? '',
       sizes: product.sizes.join(', '),
       grits: product.grits.join(', '),
       colours: product.colours.join(', '),
@@ -243,7 +272,7 @@ export function ProductsPage() {
     setShowForm(true);
   }
 
-  function chooseImage(file?: File) {
+  async function chooseImage(file?: File) {
     if (!file) return;
     if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
       setNotice('Choose a JPEG, PNG, or WebP image.');
@@ -254,8 +283,13 @@ export function ProductsPage() {
       return;
     }
     setNotice('');
-    setImageFile(file);
-    setImagePreview(URL.createObjectURL(file));
+    try {
+      const optimized = await optimizeProductImage(file);
+      setImageFile(optimized);
+      setImagePreview(URL.createObjectURL(optimized));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Unable to prepare the product image.');
+    }
   }
 
   function startNewProduct() {
@@ -432,6 +466,29 @@ export function ProductsPage() {
               )}
             </div>
           </div>
+          <div className="product-form-section">
+            <div className="product-section-heading">
+              <span>04</span>
+              <div>
+                <strong>Meta WhatsApp catalog mapping</strong>
+                <small>Connect this product to its item in Meta Commerce Manager.</small>
+              </div>
+            </div>
+            <div className="form-grid">
+              <label>
+                Meta catalog retailer ID
+                <input
+                  maxLength={100}
+                  value={draft.whatsappProductRetailerId}
+                  onChange={(event) => setDraft({ ...draft, whatsappProductRetailerId: event.target.value })}
+                  placeholder="Exact retailer_id / SKU from Meta"
+                />
+                <span className="field-hint">
+                  Must exactly match this item’s retailer_id in the WhatsApp catalog.
+                </span>
+              </label>
+            </div>
+          </div>
           <div className="product-form-footer">
             <p className="muted small">These verified details and image will be shared with WhatsApp customers.</p>
             <button className="primary-button" disabled={save.isPending}>
@@ -521,6 +578,7 @@ export function ProductsPage() {
               <tr>
                 <th>PRODUCT</th>
                 <th>CATEGORY</th>
+                <th>META RETAILER ID</th>
                 <th>DESCRIPTION</th>
                 <th>STATUS</th>
                 <th />
@@ -543,6 +601,7 @@ export function ProductsPage() {
                     </div>
                   </td>
                   <td>{product.category}</td>
+                  <td>{product.whatsappProductRetailerId || <span className="muted">Not mapped</span>}</td>
                   <td className="description-cell">{product.description}</td>
                   <td>
                     <span className={`status-chip ${product.isActive ? 'on' : 'off'}`}>
@@ -580,7 +639,7 @@ export function ProductsPage() {
               ))}
               {products.data?.items.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="empty-row">
+                  <td colSpan={6} className="empty-row">
                     No products match these filters. Try changing your search or filters.
                   </td>
                 </tr>

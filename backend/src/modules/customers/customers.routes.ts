@@ -47,6 +47,40 @@ customersRouter.get(
 );
 
 customersRouter.patch(
+  '/opt-in/bulk',
+  authenticate,
+  requireRoles('ADMIN', 'SALES'),
+  asyncHandler(async (req, res) => {
+    const input = z
+      .object({
+        ids: z
+          .array(z.string().regex(/^[a-f\d]{24}$/i))
+          .min(1)
+          .max(100)
+          .transform((ids) => [...new Set(ids)]),
+        status: z.enum(['OPTED_IN', 'OPTED_OUT']),
+        source: z.string().trim().min(1).max(500),
+      })
+      .parse(req.body);
+    const filter = { _id: { $in: input.ids.map((id) => new Types.ObjectId(id)) } };
+    const update =
+      input.status === 'OPTED_IN'
+        ? {
+            $set: { optInStatus: input.status, optInAt: new Date(), optInSource: input.source },
+          }
+        : {
+            $set: { optInStatus: input.status, optInSource: input.source },
+            $unset: { optInAt: 1 },
+          };
+    const result = await Customer.updateMany(filter, update);
+    res.json({
+      success: true,
+      data: { matchedCount: result.matchedCount, updatedCount: result.modifiedCount },
+    });
+  }),
+);
+
+customersRouter.patch(
   '/:id/opt-in',
   authenticate,
   requireRoles('ADMIN', 'SALES'),

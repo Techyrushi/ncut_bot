@@ -29,6 +29,36 @@ export async function recoverInterruptedCampaignSends(): Promise<void> {
   }
 }
 
+export async function finalizeCancelledCampaigns(campaignId?: string): Promise<void> {
+  const campaigns = await BulkCampaign.find({
+    status: 'CANCELLED',
+    ...(campaignId ? { _id: campaignId } : {}),
+  })
+    .sort({ updatedAt: 1 })
+    .limit(20)
+    .lean();
+
+  for (const campaign of campaigns) {
+    if (await BulkCampaignRecipient.exists({ campaignId: campaign._id, status: 'SENDING' })) continue;
+
+    await Message.updateMany(
+      { bulkCampaignId: campaign._id },
+      { $unset: { bulkCampaignId: 1, bulkRecipientId: 1 } },
+    );
+    const recipients = await BulkCampaignRecipient.deleteMany({ campaignId: campaign._id });
+    const deletedCampaign = await BulkCampaign.findOneAndDelete({
+      _id: campaign._id,
+      status: 'CANCELLED',
+    });
+    if (!deletedCampaign) continue;
+
+    await recordSystemActivity(
+      'BULK_CAMPAIGN_DELETED',
+      `Deleted cancelled campaign "${campaign.name}" and ${recipients.deletedCount} recipient record(s); sent messages remain in conversation history`,
+    );
+  }
+}
+
 async function updateCampaignCompletion(campaignId: string): Promise<void> {
   const pending = await BulkCampaignRecipient.exists({
     campaignId,
@@ -63,6 +93,14 @@ async function processOneRecipient(): Promise<void> {
 
   let acceptedMessageId: string | undefined;
   try {
+    if (!(await BulkCampaign.exists({ _id: campaign._id, status: 'PROCESSING' }))) {
+      await BulkCampaignRecipient.updateOne(
+        { _id: recipient._id, status: 'SENDING' },
+        { $set: { status: 'UNSENT', eligible: false, reason: 'Campaign deletion was requested before sending' } },
+      );
+      return;
+    }
+
     const customer = recipient.customerId ? await Customer.findById(recipient.customerId) : null;
     if (!customer || customer.optInStatus !== 'OPTED_IN') {
       await BulkCampaignRecipient.updateOne(
@@ -175,7 +213,9 @@ export async function processBulkCampaignQueue(): Promise<void> {
       await recoverInterruptedCampaignSends();
       lastRecoveryAt = Date.now();
     }
+    await finalizeCancelledCampaigns();
     await processOneRecipient();
+    await finalizeCancelledCampaigns();
   } finally {
     workerBusy = false;
   }

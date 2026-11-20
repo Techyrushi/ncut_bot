@@ -17,6 +17,7 @@ export interface Product {
   category: string;
   description: string;
   imageUrl?: string;
+  whatsappProductRetailerId?: string;
   isActive: boolean;
   sizes: string[];
   grits: string[];

@@ -12,6 +12,7 @@ const productSchema = new Schema(
     backing: { type: [String], default: [] },
     specifications: { type: Schema.Types.Mixed, default: {} },
     imageUrl: { type: String, trim: true, maxlength: 2048 },
+    whatsappProductRetailerId: { type: String, trim: true, maxlength: 100 },
     isActive: { type: Boolean, default: true },
   },
   { timestamps: true },

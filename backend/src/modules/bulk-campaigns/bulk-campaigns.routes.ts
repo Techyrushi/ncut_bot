@@ -11,6 +11,7 @@ import { BulkCampaign, BulkCampaignRecipient } from '../../database/models/bulk-
 import { Conversation } from '../../database/models/conversation.model';
 import { Customer } from '../../database/models/customer.model';
 import { authenticate, requireRoles, type AuthenticatedRequest } from '../../middleware/auth';
+import { finalizeCancelledCampaigns } from './bulk-campaign.service';
 import { recordActivity } from '../logs/activity-log';
 import { asyncHandler } from '../../utils/async-handler';
 import { ApiError } from '../../utils/api-error';
@@ -53,7 +54,7 @@ const campaignPageSchema = z.object({
 });
 const campaignListSchema = campaignPageSchema.extend({
   search: z.string().trim().max(120).optional(),
-  status: z.enum(['DRAFT', 'READY', 'QUEUED', 'PROCESSING', 'COMPLETED']).optional(),
+  status: z.enum(['DRAFT', 'READY', 'QUEUED', 'PROCESSING', 'COMPLETED', 'CANCELLED']).optional(),
   startDate: z.string().date().optional(),
   endDate: z.string().date().optional(),
 });
@@ -492,7 +493,7 @@ bulkCampaignsRouter.get(
     if (startDate && endDate && startDate > endDate) {
       throw new ApiError(400, 'Start date must be on or before end date', 'INVALID_DATE_RANGE');
     }
-    const filter: Record<string, unknown> = {};
+    const filter: Record<string, unknown> = { status: { $ne: 'CANCELLED' } };
     if (status) filter.status = status;
     if (search) filter.name = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
     if (startDate || endDate) {
@@ -605,19 +606,30 @@ bulkCampaignsRouter.post(
       { campaignId, eligible: true, status: 'UNSENT' },
       { $set: { status: 'QUEUED' } },
     );
-    campaign.status = 'QUEUED';
-    campaign.startedAt = new Date();
-    await campaign.save();
+    const queuedCampaign = await BulkCampaign.findOneAndUpdate(
+      { _id: campaignId, status: 'READY' },
+      { $set: { status: 'QUEUED', startedAt: new Date() } },
+      { new: true },
+    );
+    if (!queuedCampaign) {
+      if (await BulkCampaign.exists({ _id: campaignId, status: 'READY' })) {
+        await BulkCampaignRecipient.updateMany(
+          { campaignId, status: 'QUEUED' },
+          { $set: { status: 'UNSENT' } },
+        );
+      }
+      throw new ApiError(409, 'The campaign changed while it was being queued; refresh and try again', 'CAMPAIGN_STATE_CHANGED');
+    }
     await recordActivity({
       source: 'USER',
       action: 'BULK_CAMPAIGN_QUEUED',
-      summary: `Queued "${campaign.name}" for ${campaign.eligibleRecipients} eligible recipients`,
+      summary: `Queued "${queuedCampaign.name}" for ${queuedCampaign.eligibleRecipients} eligible recipients`,
       resourceType: 'bulk-campaign',
-      resourceId: campaign.id,
+      resourceId: queuedCampaign.id,
       actorId: (req as AuthenticatedRequest).user?.id,
       actorRole: 'ADMIN',
     });
-    res.status(202).json({ success: true, data: { campaign, queued: campaign.eligibleRecipients } });
+    res.status(202).json({ success: true, data: { campaign: queuedCampaign, queued: queuedCampaign.eligibleRecipients } });
   }),
 );
 
@@ -626,30 +638,40 @@ bulkCampaignsRouter.delete(
   ...adminOnly,
   asyncHandler(async (req, res) => {
     const campaignId = campaignIdOrThrow(req.params.id);
-    const campaign = await BulkCampaign.findById(campaignId);
-    if (!campaign) throw new ApiError(404, 'Campaign not found', 'NOT_FOUND');
-    if (!['DRAFT', 'READY'].includes(campaign.status)) {
-      throw new ApiError(
-        409,
-        'Only unsent draft or previewed campaigns can be deleted; delivery history is retained.',
-        'CAMPAIGN_HISTORY_PROTECTED',
-      );
+    const campaign = await BulkCampaign.findOneAndUpdate(
+      { _id: campaignId, status: { $ne: 'CANCELLED' } },
+      { $set: { status: 'CANCELLED' } },
+      { new: true },
+    );
+    if (!campaign) {
+      if (!(await BulkCampaign.exists({ _id: campaignId, status: 'CANCELLED' }))) {
+        throw new ApiError(404, 'Campaign not found', 'NOT_FOUND');
+      }
     }
 
-    const recipients = await BulkCampaignRecipient.deleteMany({ campaignId });
-    await campaign.deleteOne();
-    await recordActivity({
-      source: 'USER',
-      action: 'BULK_CAMPAIGN_DELETED',
-      summary: `Deleted unsent campaign "${campaign.name}" and ${recipients.deletedCount} recipient preview record(s)`,
-      resourceType: 'bulk-campaign',
-      resourceId: campaign.id,
-      actorId: (req as AuthenticatedRequest).user?.id,
-      actorRole: 'ADMIN',
-    });
-    res.json({
+    if (campaign) {
+      await recordActivity({
+        source: 'USER',
+        action: 'BULK_CAMPAIGN_DELETION_REQUESTED',
+        summary: `Requested deletion of campaign "${campaign.name}"`,
+        resourceType: 'bulk-campaign',
+        resourceId: campaign.id,
+        actorId: (req as AuthenticatedRequest).user?.id,
+        actorRole: 'ADMIN',
+      });
+    }
+
+    await finalizeCancelledCampaigns(String(campaignId));
+    const deletionPending = Boolean(await BulkCampaign.exists({ _id: campaignId, status: 'CANCELLED' }));
+    res.status(deletionPending ? 202 : 200).json({
       success: true,
-      data: { id: campaign.id, deletedRecipients: recipients.deletedCount },
+      data: {
+        id: campaignId,
+        deletionPending,
+        message: deletionPending
+          ? 'Campaign sending was cancelled. Any send already in progress will finish before its history is removed.'
+          : 'Campaign and recipient records deleted. Sent messages remain in conversation history.',
+      },
     });
   }),
 );

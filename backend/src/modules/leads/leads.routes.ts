@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { Types, type PipelineStage } from 'mongoose';
 import { z } from 'zod';
 import { Customer } from '../../database/models/customer.model';
-import { Lead } from '../../database/models/lead.model';
+import { Lead, SALES_FOLLOW_UP_REQUIREMENT } from '../../database/models/lead.model';
 import { Product } from '../../database/models/product.model';
 import { User } from '../../database/models/user.model';
 import { Conversation } from '../../database/models/conversation.model';
@@ -103,7 +103,9 @@ function leadCsvRow(lead: Record<string, unknown>): string[] {
     String(customer.profileName ?? customer.name ?? 'Customer'),
     String(customer.phoneNumber ?? ''),
     productNames,
-    String(lead.requirement ?? ''),
+    typeof lead.requirement === 'string' && lead.requirement.trim()
+      ? lead.requirement.trim()
+      : SALES_FOLLOW_UP_REQUIREMENT,
     String(assignee.name ?? ''),
     String(lead.status ?? ''),
     String(lead.notificationStatus ?? 'PENDING'),
@@ -230,6 +232,10 @@ async function getLeadGroups(
     );
     return [{
       ...lead,
+      requirement:
+        typeof lead.requirement === 'string' && lead.requirement.trim()
+          ? lead.requirement.trim()
+          : SALES_FOLLOW_UP_REQUIREMENT,
       isUnreadLead: group.isUnreadLead === 1,
       leadHistory: group.leadHistory,
       chatHistoryCount: visitIds.size || history?.chatHistoryCount || 0,

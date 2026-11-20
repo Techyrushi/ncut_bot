@@ -3,6 +3,7 @@
 ## Before launch
 
 - Set `NODE_ENV=production`; validate all Meta credentials, Mongo URI, JWT secret, and notification configuration.
+- To send native WhatsApp product cards, set `WHATSAPP_CATALOG_ID` to the catalog connected to the business phone number and map each active product to its exact Meta `retailer_id` in the Products form. Multi-product messages support up to 30 mapped products.
 - Use a dedicated managed MongoDB cluster with authentication, TLS, network allowlisting, backups, restore drills, and least-privilege app credentials.
 - Use a replica set/Atlas deployment if future operations require transactions.
 - Configure a secret manager, rotation process, restricted access, and separate credentials per environment.

@@ -20,6 +20,7 @@ type WhatsAppPhoneNumberResponse = {
 };
 type InteractiveButton = { id: string; title: string };
 type InteractiveRow = { id: string; title: string; description?: string };
+type ProductCatalogSection = { title: string; product_items: Array<{ product_retailer_id: string }> };
 
 function metaApiError(error: WhatsAppApiError | undefined): ApiError {
   if (error?.code === 200 && error.message?.includes('Cannot call API for app')) {
@@ -205,6 +206,51 @@ export class WhatsAppService {
             })),
           })),
         },
+      },
+    });
+  }
+
+  sendProductList(
+    to: string,
+    catalogId: string,
+    header: string,
+    body: string,
+    sections: ProductCatalogSection[],
+  ): Promise<string> {
+    const products = sections.flatMap((section) => section.product_items);
+    if (
+      !catalogId.trim() ||
+      !header.trim() ||
+      header.length > 60 ||
+      !body.trim() ||
+      body.length > 1024 ||
+      sections.length < 1 ||
+      sections.length > 10 ||
+      products.length < 1 ||
+      products.length > 30 ||
+      sections.some(
+        (section) =>
+          !section.title.trim() ||
+          section.title.length > 24 ||
+          section.product_items.length < 1 ||
+          section.product_items.some(
+            (item) => !item.product_retailer_id.trim() || item.product_retailer_id.length > 100,
+          ),
+      )
+    ) {
+      throw new ApiError(
+        400,
+        'WhatsApp product lists require a catalog, valid sections, and between 1 and 30 mapped products',
+        'INVALID_PRODUCT_LIST',
+      );
+    }
+    return this.send(to, {
+      type: 'interactive',
+      interactive: {
+        type: 'product_list',
+        header: { type: 'text', text: header },
+        body: { text: body },
+        action: { catalog_id: catalogId, sections },
       },
     });
   }

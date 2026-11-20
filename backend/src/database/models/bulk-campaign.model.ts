@@ -18,7 +18,7 @@ const bulkCampaignSchema = new Schema(
     createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     status: {
       type: String,
-      enum: ['DRAFT', 'READY', 'QUEUED', 'PROCESSING', 'COMPLETED'],
+      enum: ['DRAFT', 'READY', 'QUEUED', 'PROCESSING', 'COMPLETED', 'CANCELLED'],
       default: 'DRAFT',
       index: true,
     },

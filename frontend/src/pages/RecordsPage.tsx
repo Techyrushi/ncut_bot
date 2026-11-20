@@ -12,6 +12,7 @@ interface RecordPageProps {
 }
 
 type ConsentFilter = 'ALL' | 'UNKNOWN' | 'OPTED_IN' | 'OPTED_OUT';
+const MAX_BULK_CONSENT_SELECTION = 100;
 
 export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
   const [search, setSearch] = useState('');
@@ -19,6 +20,8 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
   const [page, setPage] = useState(1);
   const [notice, setNotice] = useState('');
   const [customerToDelete, setCustomerToDelete] = useState<{ id: string; name: string; phone: string }>();
+  const [selectedCustomerIds, setSelectedCustomerIds] = useState<string[]>([]);
+  const [bulkOptInStatus, setBulkOptInStatus] = useState<'OPTED_IN' | 'OPTED_OUT'>();
   const { user } = useAuth();
   const client = useQueryClient();
   const pageSize = 10;
@@ -41,14 +44,42 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
       }),
     onSuccess: async (_response, { status }) => {
       setNotice(status === 'OPTED_IN' ? 'Customer consent recorded.' : 'Customer opt-out recorded.');
-      await client.invalidateQueries({ queryKey: ['customers'] });
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['customers'] }),
+        client.invalidateQueries({ queryKey: ['bulk-campaigns'] }),
+        client.invalidateQueries({ queryKey: ['bulk-campaign'] }),
+      ]);
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : 'Unable to update customer consent.'),
   });
+  const updateOptInBulk = useMutation({
+    mutationFn: async ({ ids, status }: { ids: string[]; status: 'OPTED_IN' | 'OPTED_OUT' }) =>
+      api.patch<ApiResponse<{ matchedCount: number; updatedCount: number }>>('/customers/opt-in/bulk', {
+        ids,
+        status,
+        source:
+          status === 'OPTED_IN'
+            ? `Bulk opt-in recorded by ${user?.email ?? 'workspace representative'} after consent verification`
+            : `Bulk opt-out recorded by ${user?.email ?? 'workspace representative'} in the admin dashboard`,
+      }),
+    onSuccess: async (response, { status }) => {
+      const count = response.data.data.matchedCount;
+      setSelectedCustomerIds([]);
+      setBulkOptInStatus(undefined);
+      setNotice(`${count} selected customer${count === 1 ? '' : 's'} recorded as ${status === 'OPTED_IN' ? 'opted in' : 'opted out'}.`);
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['customers'] }),
+        client.invalidateQueries({ queryKey: ['bulk-campaigns'] }),
+        client.invalidateQueries({ queryKey: ['bulk-campaign'] }),
+      ]);
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : 'Unable to update selected customer consent.'),
+  });
   const deleteCustomer = useMutation({
     mutationFn: async ({ id }: { id: string; name: string }) => api.delete(`/customers/${id}`),
-    onSuccess: async (_response, { name }) => {
+    onSuccess: async (_response, { id, name }) => {
       setCustomerToDelete(undefined);
+      setSelectedCustomerIds((current) => current.filter((selectedId) => selectedId !== id));
       setNotice(`${name} and associated history were deleted.`);
       await Promise.all([
         client.invalidateQueries({ queryKey: ['customers'] }),
@@ -62,12 +93,33 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
   });
   const columns =
     kind === 'customers'
-      ? ['profileName', 'phoneNumber', 'optInStatus', 'updatedAt']
+      ? ['selection', 'profileName', 'phoneNumber', 'optInStatus', 'updatedAt']
       : kind === 'leads'
         ? ['customerId', 'status', 'assignedSalesPerson', 'createdAt']
         : ['customerId', 'status', 'currentStep', 'lastMessageAt'];
   const total = query.data?.total ?? 0;
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const currentPageCustomerIds =
+    kind === 'customers' ? (query.data?.items ?? []).map((record, row) => String(record._id ?? row)) : [];
+  const currentPageSelected =
+    currentPageCustomerIds.length > 0 && currentPageCustomerIds.every((id) => selectedCustomerIds.includes(id));
+
+  function toggleCurrentPageSelection(): void {
+    setSelectedCustomerIds((current) => {
+      const selected = new Set(current);
+      for (const id of currentPageCustomerIds) {
+        if (currentPageSelected) selected.delete(id);
+        else selected.add(id);
+      }
+      return [...selected];
+    });
+  }
+
+  function toggleCustomerSelection(id: string): void {
+    setSelectedCustomerIds((current) =>
+      current.includes(id) ? current.filter((selectedId) => selectedId !== id) : [...current, id],
+    );
+  }
 
   return (
     <div className="page-stack">
@@ -75,11 +127,18 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
         <div>
           <div className="eyebrow">{eyebrow}</div>
           <h1>{title}</h1>
-          <p>Find customer records, check WhatsApp consent, and keep your audience up to date.</p>
+          <p>
+            {kind === 'customers'
+              ? 'New contacts stay UNKNOWN until opt-in is verified. Record consent before sending business-initiated messages.'
+              : 'Find customer records and review their WhatsApp activity.'}
+          </p>
         </div>
       </div>
       {notice && (
-        <div className={`alert ${updateOptIn.isError || deleteCustomer.isError ? 'error' : ''}`} role="status">
+        <div
+          className={`alert ${updateOptIn.isError || updateOptInBulk.isError || deleteCustomer.isError ? 'error' : ''}`}
+          role="status"
+        >
           {notice}
           <button type="button" onClick={() => setNotice('')} aria-label="Dismiss notification">
             ×
@@ -101,6 +160,7 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
             <input
               value={search}
               onChange={(event) => {
+                setSelectedCustomerIds([]);
                 setSearch(event.target.value);
                 setPage(1);
               }}
@@ -115,6 +175,7 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
                 aria-label="Filter customers by consent"
                 value={consentFilter}
                 onChange={(event) => {
+                  setSelectedCustomerIds([]);
                   setConsentFilter(event.target.value as ConsentFilter);
                   setPage(1);
                 }}
@@ -131,6 +192,7 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
               type="button"
               className="table-reset-button"
               onClick={() => {
+                setSelectedCustomerIds([]);
                 setSearch('');
                 setConsentFilter('ALL');
                 setPage(1);
@@ -140,6 +202,38 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
             </button>
           )}
         </div>
+        {kind === 'customers' && selectedCustomerIds.length > 0 && (
+          <div className="customer-bulk-toolbar" role="group" aria-label="Bulk consent actions">
+            <span aria-live="polite">
+              {selectedCustomerIds.length} customer{selectedCustomerIds.length === 1 ? '' : 's'} selected
+            </span>
+            <div>
+              <button
+                type="button"
+                className="table-action-button"
+                disabled={updateOptInBulk.isPending || updateOptIn.isPending}
+                onClick={() => setBulkOptInStatus('OPTED_IN')}
+              >
+                Record opt-in
+              </button>
+              <button
+                type="button"
+                className="table-action-button subtle-danger"
+                disabled={updateOptInBulk.isPending || updateOptIn.isPending}
+                onClick={() => setBulkOptInStatus('OPTED_OUT')}
+              >
+                Opt out
+              </button>
+              <button
+                type="button"
+                className="table-reset-button"
+                onClick={() => setSelectedCustomerIds([])}
+              >
+                Clear selection
+              </button>
+            </div>
+          </div>
+        )}
         {query.isError && (
           <div className="alert error">
             {query.error instanceof Error ? query.error.message : 'Unable to load records.'}
@@ -150,6 +244,24 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
           <table className="admin-data-table customers-table">
             <thead>
               <tr>
+                {kind === 'customers' && (
+                  <th className="customer-select-heading">
+                    <input
+                      type="checkbox"
+                      aria-label="Select all customers on this page"
+                      checked={currentPageSelected}
+                      disabled={
+                        currentPageCustomerIds.length === 0 ||
+                        query.isLoading ||
+                        (!currentPageSelected &&
+                          new Set([...selectedCustomerIds, ...currentPageCustomerIds]).size >
+                            MAX_BULK_CONSENT_SELECTION)
+                      }
+                      title={`Bulk consent updates are limited to ${MAX_BULK_CONSENT_SELECTION} customers at a time`}
+                      onChange={toggleCurrentPageSelection}
+                    />
+                  </th>
+                )}
                 <th>CUSTOMER</th>
                 <th>WHATSAPP NUMBER</th>
                 <th>CONSENT STATUS</th>
@@ -165,6 +277,25 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
                 const targetStatus = consent === 'OPTED_IN' ? 'OPTED_OUT' : 'OPTED_IN';
                 return (
                   <tr key={id}>
+                    {kind === 'customers' && (
+                      <td className="customer-select-cell">
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${displayName}`}
+                          checked={selectedCustomerIds.includes(id)}
+                          disabled={
+                            !selectedCustomerIds.includes(id) &&
+                            selectedCustomerIds.length >= MAX_BULK_CONSENT_SELECTION
+                          }
+                          title={
+                            selectedCustomerIds.length >= MAX_BULK_CONSENT_SELECTION
+                              ? `Bulk consent updates are limited to ${MAX_BULK_CONSENT_SELECTION} customers at a time`
+                              : undefined
+                          }
+                          onChange={() => toggleCustomerSelection(id)}
+                        />
+                      </td>
+                    )}
                     <td>
                       <div className="customer-name-cell">
                         <span className="customer-initial">{displayName.slice(0, 1).toUpperCase()}</span>
@@ -271,6 +402,24 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
           error={deleteCustomer.error instanceof Error ? deleteCustomer.error.message : undefined}
           onCancel={() => setCustomerToDelete(undefined)}
           onConfirm={() => deleteCustomer.mutate({ id: customerToDelete.id, name: customerToDelete.name })}
+        />
+      )}
+      {bulkOptInStatus && (
+        <ConfirmDialog
+          title={bulkOptInStatus === 'OPTED_IN' ? 'Record bulk opt-in?' : 'Record bulk opt-out?'}
+          message={
+            bulkOptInStatus === 'OPTED_IN'
+              ? `Only continue if each of the ${selectedCustomerIds.length} selected customers explicitly opted in and you verified the consent source. Record opt-in for all selected customers?`
+              : `Record ${selectedCustomerIds.length} selected customers as opted out? They will be excluded from future bulk sends.`
+          }
+          confirmLabel={bulkOptInStatus === 'OPTED_IN' ? 'Record opt-in' : 'Opt out selected'}
+          pendingLabel="Updating…"
+          isPending={updateOptInBulk.isPending}
+          error={updateOptInBulk.error instanceof Error ? updateOptInBulk.error.message : undefined}
+          onCancel={() => setBulkOptInStatus(undefined)}
+          onConfirm={() =>
+            updateOptInBulk.mutate({ ids: selectedCustomerIds, status: bulkOptInStatus })
+          }
         />
       )}
     </div>

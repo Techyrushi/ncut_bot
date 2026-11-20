@@ -57,6 +57,38 @@ function fakeMetaSend(): void {
   );
 }
 
+let statusEventCounter = 0;
+
+async function markDelivered(whatsappMessageId: string): Promise<void> {
+  await WebhookEvent.create({
+    eventId: `test-status:${whatsappMessageId}:${++statusEventCounter}`,
+    eventType: 'status',
+    payload: {
+      id: whatsappMessageId,
+      status: 'delivered',
+      timestamp: String(Math.floor(Date.now() / 1000)),
+    },
+  });
+  await processPendingWebhookEvents();
+}
+
+async function deliverPendingActions(): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const pending = await Message.findOne({
+      direction: 'OUTBOUND',
+      status: 'SENT',
+      deliveryActionStatus: 'PENDING',
+    })
+      .sort({ timestamp: 1, _id: 1 })
+      .lean();
+    if (!pending?.whatsappMessageId) return;
+    await markDelivered(pending.whatsappMessageId);
+    const latest = await Message.findById(pending._id).select('deliveryActionStatus').lean();
+    if (latest?.deliveryActionStatus === 'PENDING') return;
+  }
+  throw new Error('Exceeded the expected WhatsApp delivery-action sequence length');
+}
+
 describe('WhatsApp webhook', () => {
   it('verifies the GET challenge only for the configured verify token', async () => {
     const accepted = await request(app)
@@ -213,9 +245,158 @@ describe('Meta Cloud API service', () => {
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('sends a native Meta product-list message with catalog retailer IDs', async () => {
+    const customer = await Customer.create({ whatsappId: '15551112223', phoneNumber: '15551112223' });
+    await Conversation.create({ customerId: customer._id, status: 'OPEN', lastInteractionAt: new Date() });
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ messages: [{ id: 'wamid.product-list' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    await whatsappService.sendProductList('15551112223', 'catalog-123', 'N-CUT Products', 'Browse products.', [
+      {
+        title: 'Available products',
+        product_items: [{ product_retailer_id: 'flap-disc-sku' }, { product_retailer_id: 'velcro-disc-sku' }],
+      },
+    ]);
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      type: 'interactive',
+      interactive: {
+        type: 'product_list',
+        header: { type: 'text', text: 'N-CUT Products' },
+        body: { text: 'Browse products.' },
+        action: {
+          catalog_id: 'catalog-123',
+          sections: [
+            {
+              title: 'Available products',
+              product_items: [
+                { product_retailer_id: 'flap-disc-sku' },
+                { product_retailer_id: 'velcro-disc-sku' },
+              ],
+            },
+          ],
+        },
+      },
+    });
+    expect(() =>
+      whatsappService.sendProductList('15551112223', 'catalog-123', 'N-CUT Products', 'Browse products.', [
+        { title: 'Available products', product_items: Array.from({ length: 31 }, () => ({ product_retailer_id: 'sku' })) },
+      ]),
+    ).toThrow('between 1 and 30 mapped products');
+  });
 });
 
 describe('catalogue automation', () => {
+  it('sends mapped catalog products in delivery-gated batches of ten', async () => {
+    jest.replaceProperty(env, 'WHATSAPP_CATALOG_ID', 'catalog-ncut-test');
+    let counter = 0;
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      return new Response(JSON.stringify({ messages: [{ id: `wamid.native-catalog.${++counter}` }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const products = await Product.create(
+      Array.from({ length: 13 }, (_, index) => ({
+        name: `Meta Catalogue Product ${String(index + 1).padStart(2, '0')}`,
+        slug: `meta-catalogue-product-${index + 1}`,
+        description: `Verified description ${index + 1}`,
+        category: 'Abrasives',
+        whatsappProductRetailerId: `meta-sku-${index + 1}`,
+      })),
+    );
+    const inbound = (id: string, selection?: string) => ({
+      id,
+      from: '15550001013',
+      timestamp: String(Math.floor(Date.now() / 1000)),
+      type: selection ? 'interactive' : 'text',
+      ...(selection
+        ? { interactive: { button_reply: { id: selection, title: selection } } }
+        : { text: { body: 'Hello' } }),
+    });
+
+    await automationService.processIncoming(inbound('native-catalog-welcome'));
+    const welcomeImage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'IMAGE' }).lean();
+    await markDelivered(welcomeImage!.whatsappMessageId!);
+    await automationService.processIncoming(inbound('native-catalog-open', 'explore_products'));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const catalogueImage = await Message.findOne({
+      direction: 'OUTBOUND',
+      messageType: 'IMAGE',
+      'content.imageUrl': new URL('/ncut-product-catalogue.jpg', env.FRONTEND_URL).toString(),
+    }).lean();
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toMatchObject({
+      type: 'image',
+      image: { link: new URL('/ncut-product-catalogue.jpg', env.FRONTEND_URL).toString() },
+    });
+    await markDelivered(catalogueImage!.whatsappMessageId!);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    const firstPayload = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body));
+    expect(firstPayload).toMatchObject({
+      type: 'interactive',
+      interactive: {
+        type: 'product_list',
+        body: {
+          text: 'Here are the first 10 products from the catalogue. Select a product to view its photo and full description.',
+        },
+        action: {
+          catalog_id: 'catalog-ncut-test',
+          sections: [{ title: 'Available products' }],
+        },
+      },
+    });
+    const firstRetailerIds = firstPayload.interactive.action.sections.flatMap(
+      (section: { product_items: Array<{ product_retailer_id: string }> }) =>
+        section.product_items.map((item) => item.product_retailer_id),
+    );
+    expect(firstRetailerIds).toEqual(
+      products.slice(0, 10).map((product) => product.whatsappProductRetailerId),
+    );
+    expect(firstRetailerIds).toHaveLength(10);
+    const firstListMessage = await Message.findOne({
+      direction: 'OUTBOUND',
+      'content.catalogId': 'catalog-ncut-test',
+      deliveryActionStatus: 'PENDING',
+    }).sort({ timestamp: 1 }).lean();
+    expect(firstListMessage?.deliveryAction).toMatchObject({
+      type: 'PRODUCT_CATALOG',
+      body: 'Here are the remaining 3 products from the catalogue. Select a product to view its photo and full description.',
+      productIds: products.slice(10).map((product) => product.whatsappProductRetailerId),
+      remainingProductIds: [],
+    });
+    expect(await Message.countDocuments({ direction: 'OUTBOUND', 'content.catalogId': 'catalog-ncut-test' })).toBe(1);
+
+    await markDelivered(firstListMessage!.whatsappMessageId!);
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    const secondPayload = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body));
+    const secondRetailerIds = secondPayload.interactive.action.sections.flatMap(
+      (section: { product_items: Array<{ product_retailer_id: string }> }) =>
+        section.product_items.map((item) => item.product_retailer_id),
+    );
+    expect(secondRetailerIds).toEqual(products.slice(10).map((product) => product.whatsappProductRetailerId));
+    expect(secondRetailerIds).toHaveLength(3);
+    expect(secondPayload).toMatchObject({
+      interactive: {
+        body: {
+          text: 'Here are the remaining 3 products from the catalogue. Select a product to view its photo and full description.',
+        },
+      },
+    });
+    expect(await Message.countDocuments({ direction: 'OUTBOUND', 'content.catalogId': 'catalog-ncut-test' })).toBe(2);
+    expect(
+      await Message.countDocuments({
+        direction: 'OUTBOUND',
+        messageType: 'IMAGE',
+        'content.imageUrl': new URL('/ncut-product-catalogue.jpg', env.FRONTEND_URL).toString(),
+      }),
+    ).toBe(1);
+  });
+
   it('lists active catalogue products directly and sends selected image and specifications', async () => {
     let counter = 0;
     const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => {
@@ -227,7 +408,8 @@ describe('catalogue automation', () => {
     const product = await Product.create({
       name: 'Custom-category flap disc',
       slug: 'custom-category-flap-disc',
-      description: 'For verified metal finishing',
+      description:
+        'For verified metal finishing, grinding and surface preparation with consistent material removal and a clean, durable finish.',
       category: 'Custom Abrasives',
       imageUrl: 'https://cdn.example.test/flap-disc.jpg',
       sizes: ['4"', '5"'],
@@ -246,10 +428,18 @@ describe('catalogue automation', () => {
     });
 
     await automationService.processIncoming(inbound('msg-welcome'));
+    const welcomeImage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'IMAGE' }).lean();
+    await markDelivered(welcomeImage!.whatsappMessageId!);
     await automationService.processIncoming(inbound('msg-product-menu', 'explore_products'));
-    const catalogueImageUrl = new URL('/N-CUT%20Abrasives%20Product%20Catalogue%20.png', env.FRONTEND_URL).toString();
-    const menuImagePayload = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
-    const menuPayload = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body)) as {
+    const catalogueImage = await Message.findOne({
+      direction: 'OUTBOUND',
+      messageType: 'IMAGE',
+      'content.imageUrl': new URL('/ncut-product-catalogue.jpg', env.FRONTEND_URL).toString(),
+    }).lean();
+    await markDelivered(catalogueImage!.whatsappMessageId!);
+    const catalogueImageUrl = new URL('/ncut-product-catalogue.jpg', env.FRONTEND_URL).toString();
+    const menuImagePayload = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body));
+    const menuPayload = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body)) as {
       interactive: {
         body: { text: string };
         action: { sections: Array<{ rows: Array<{ id: string; description?: string }> }> };
@@ -260,17 +450,34 @@ describe('catalogue automation', () => {
       image: { link: catalogueImageUrl },
     });
     expect(menuPayload.interactive.body.text).toBe(
-      'See the catalogue image above, then choose a product below to receive its photo, description, and specifications.',
+      'See the catalogue image above, then select a product to see its photo and full description.',
     );
     const productRow = menuPayload.interactive.action.sections[0]?.rows[0];
     expect(productRow).toMatchObject({
       id: `product:${product.id}`,
-      description: expect.stringContaining('Custom Abrasives'),
+      title: product.name.slice(0, 24),
     });
+    expect(productRow?.description).toMatch(/^For verified metal finishing/);
+    expect(productRow?.description?.length).toBeLessThanOrEqual(72);
+    expect(productRow?.description?.endsWith('…')).toBe(true);
+    expect(productRow?.description).not.toContain('Custom Abrasives');
 
     await automationService.processIncoming(inbound('msg-product-selected', `product:${product.id}`));
+    const productImage = await Message.findOne({
+      direction: 'OUTBOUND',
+      messageType: 'IMAGE',
+      'content.imageUrl': product.imageUrl,
+    }).lean();
+    await markDelivered(productImage!.whatsappMessageId!);
+    const productDetails = await Message.findOne({
+      direction: 'OUTBOUND',
+      messageType: 'TEXT',
+      'content.productId': product.id,
+    }).lean();
+    await markDelivered(productDetails!.whatsappMessageId!);
     const sentPayloads = fetchMock.mock.calls.map(([, options]) => JSON.parse(String(options?.body)));
     expect(sentPayloads.map((payload) => payload.type)).toEqual([
+      'image',
       'interactive',
       'image',
       'interactive',
@@ -278,24 +485,178 @@ describe('catalogue automation', () => {
       'text',
       'interactive',
     ]);
-    expect(sentPayloads[3]).toMatchObject({ image: { link: product.imageUrl } });
+    expect(sentPayloads[4]).toMatchObject({ image: { link: product.imageUrl } });
     const messages = await Message.find({ direction: 'OUTBOUND' }).lean();
     expect(messages.some((message) => message.messageType === 'IMAGE' && message.content.imageUrl === product.imageUrl))
       .toBe(true);
     const details = messages.find(
       (message) => message.messageType === 'TEXT' && message.content.productId?.toString() === product.id,
     );
-    expect(details?.content.text).toContain('Material: Zirconia');
-    expect(details?.content.text).toContain('Sizes: 4", 5"');
-    expect(details?.content.text).toContain('Grits: 60, 80');
+    expect(details?.content.text).toBe(
+      `${product.name}\n\n${product.description}\n\nSpecifications:\nMaterial: Zirconia\n\nSizes: 4", 5"\n\nGrits: 60, 80\n\nBacking: Fiber`,
+    );
+    expect((String(details?.content.text).match(/Custom-category flap disc/g) ?? [])).toHaveLength(1);
+    expect(sentPayloads[4]?.image).not.toHaveProperty('caption');
   });
 
-  it('handles Meta business-scoped sender IDs when phone numbers are omitted', async () => {
-    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ messages: [{ id: 'wamid.bsuid.outbound' }] }), {
+  it('waits for media delivery before sending welcome, catalogue, and product follow-ups', async () => {
+    let counter = 0;
+    const productImageUrl = 'https://cdn.example.test/ordered-flap-disc.jpg';
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      return new Response(JSON.stringify({ messages: [{ id: `wamid.ordered.${++counter}` }] }), {
         status: 200,
         headers: { 'content-type': 'application/json' },
-      }),
+      });
+    });
+    const product = await Product.create({
+      name: 'Ordered Flap Disc',
+      slug: 'ordered-flap-disc',
+      description: 'Verified product details',
+      category: 'Flap Disc',
+      imageUrl: productImageUrl,
+    });
+    const inbound = (id: string, selection?: string) => ({
+      id,
+      from: '15550001011',
+      timestamp: String(Math.floor(Date.now() / 1000)),
+      type: selection ? 'interactive' : 'text',
+      ...(selection
+        ? { interactive: { button_reply: { id: selection, title: selection } } }
+        : { text: { body: 'Hello' } }),
+    });
+
+    await automationService.processIncoming(inbound('ordered-welcome'));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({ type: 'image' });
+    const welcomeImage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'IMAGE' }).lean();
+    await markDelivered(welcomeImage!.whatsappMessageId!);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({ type: 'interactive' });
+    await markDelivered(welcomeImage!.whatsappMessageId!);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const catalogueImageUrl = new URL(
+      '/ncut-product-catalogue.jpg',
+      env.FRONTEND_URL,
+    ).toString();
+    await automationService.processIncoming(inbound('ordered-menu', 'explore_products'));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toMatchObject({
+      type: 'image',
+      image: { link: catalogueImageUrl },
+    });
+    const catalogueImage = await Message.findOne({
+      direction: 'OUTBOUND',
+      messageType: 'IMAGE',
+      'content.imageUrl': catalogueImageUrl,
+    }).lean();
+    await markDelivered(catalogueImage!.whatsappMessageId!);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toMatchObject({ type: 'interactive' });
+
+    await automationService.processIncoming(inbound('ordered-product', `product:${product.id}`));
+    expect(fetchMock).toHaveBeenCalledTimes(5);
+    expect(JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body))).toMatchObject({
+      type: 'image',
+      image: { link: productImageUrl },
+    });
+    const productImage = await Message.findOne({
+      direction: 'OUTBOUND',
+      messageType: 'IMAGE',
+      'content.imageUrl': productImageUrl,
+    }).lean();
+    await markDelivered(productImage!.whatsappMessageId!);
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    expect(JSON.parse(String(fetchMock.mock.calls[5]?.[1]?.body))).toMatchObject({
+      type: 'text',
+      text: { body: expect.stringContaining(product.name) },
+    });
+    const productDetails = await Message.findOne({
+      direction: 'OUTBOUND',
+      messageType: 'TEXT',
+      'content.productId': product.id,
+    }).lean();
+    await markDelivered(productDetails!.whatsappMessageId!);
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+    expect(JSON.parse(String(fetchMock.mock.calls[6]?.[1]?.body))).toMatchObject({ type: 'interactive' });
+  });
+
+  it('sends every catalogue product in delivery-gated lists of at most ten rows', async () => {
+    let counter = 0;
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      return new Response(JSON.stringify({ messages: [{ id: `wamid.catalogue-pages.${++counter}` }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const products = await Product.create(
+      Array.from({ length: 13 }, (_, index) => ({
+        name: `Catalogue Product ${String(index + 1).padStart(2, '0')}`,
+        slug: `catalogue-product-${index + 1}`,
+        description: `Description for product ${index + 1}`,
+        category: 'Catalogue',
+      })),
+    );
+    const inbound = (id: string, selection?: string) => ({
+      id,
+      from: '15550001012',
+      timestamp: String(Math.floor(Date.now() / 1000)),
+      type: selection ? 'interactive' : 'text',
+      ...(selection
+        ? { interactive: { button_reply: { id: selection, title: selection } } }
+        : { text: { body: 'Hello' } }),
+    });
+
+    await automationService.processIncoming(inbound('paged-welcome'));
+    const welcomeImage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'IMAGE' }).lean();
+    await markDelivered(welcomeImage!.whatsappMessageId!);
+    await automationService.processIncoming(inbound('paged-menu', 'explore_products'));
+    const catalogueImage = await Message.findOne({
+      direction: 'OUTBOUND',
+      messageType: 'IMAGE',
+      'content.imageUrl': new URL('/ncut-product-catalogue.jpg', env.FRONTEND_URL).toString(),
+    }).lean();
+    await markDelivered(catalogueImage!.whatsappMessageId!);
+
+    const productLists = () =>
+      Message.find({ direction: 'OUTBOUND', messageType: 'INTERACTIVE', 'content.products': { $exists: true } })
+        .sort({ timestamp: 1, _id: 1 })
+        .lean();
+    let lists = await productLists();
+    expect(lists).toHaveLength(1);
+    const firstPayloadRows = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body)).interactive.action.sections[0]
+      .rows as Array<{ id: string; title: string }>;
+    const firstAction = lists[0]?.deliveryAction as {
+      type: string;
+      sections: Array<{ rows: Array<{ id: string; title: string }> }>;
+      remainingRows: Array<{ id: string; title: string }>;
+    };
+    expect(firstAction.type).toBe('PRODUCT_MENU');
+    expect(firstPayloadRows).toHaveLength(10);
+    expect(firstAction.sections[0]?.rows).toHaveLength(3);
+    expect(firstAction.remainingRows).toHaveLength(0);
+
+    await markDelivered(lists[0]!.whatsappMessageId!);
+    lists = await productLists();
+    expect(lists).toHaveLength(2);
+    const secondRows = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body)).interactive.action.sections[0].rows as Array<{
+      id: string;
+      title: string;
+    }>;
+    expect(secondRows).toHaveLength(3);
+    const allRows = [...firstPayloadRows, ...secondRows];
+    expect(allRows.map((row) => row.id)).toEqual(products.map((product) => `product:${product.id}`));
+    expect(allRows.some((row) => row.title.toLowerCase().includes('more products'))).toBe(false);
+  });
+
+  it('sends the welcome image before one welcome message with its reply buttons', async () => {
+    let counter = 0;
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ messages: [{ id: `wamid.bsuid.outbound.${++counter}` }] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
     );
     const senderId = 'US.13491208655302741918';
     await automationService.processIncoming({
@@ -306,11 +667,46 @@ describe('catalogue automation', () => {
       text: { body: 'Hello' },
     });
 
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const welcomeImage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'IMAGE' }).lean();
+    await markDelivered(welcomeImage!.whatsappMessageId!);
     const customer = await Customer.findOne({ whatsappId: senderId });
     expect(customer?.phoneNumber).toBeUndefined();
+    expect(customer?.optInStatus).toBe('UNKNOWN');
     expect((await Conversation.findOne({ customerId: customer?._id }))?.currentStep).toBe('WELCOME_SENT');
-    expect(await Message.countDocuments({ direction: 'OUTBOUND' })).toBe(1);
-    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({ to: senderId });
+    const payloads = fetchMock.mock.calls.map(([, options]) => JSON.parse(String(options?.body)));
+    expect(payloads).toHaveLength(2);
+    expect(payloads[0]).toMatchObject({
+      to: senderId,
+      type: 'image',
+      image: { link: new URL('/ncut-welcome-message-v2.jpg', env.FRONTEND_URL).toString() },
+    });
+    expect(payloads[1]).toMatchObject({
+      to: senderId,
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        body: { text: '👋 Thank you for connecting with us!\n\nExplore our range of abrasive and finishing products.' },
+        action: {
+          buttons: [
+            { reply: { id: 'explore_products', title: 'Explore Our Products' } },
+            { reply: { id: 'connect_sales', title: 'Connect With Team' } },
+          ],
+        },
+      },
+    });
+    expect(await Message.countDocuments({ direction: 'OUTBOUND' })).toBe(2);
+    expect(await Message.find({ direction: 'OUTBOUND' }).sort({ _id: 1 }).distinct('messageType')).toEqual(
+      expect.arrayContaining(['IMAGE', 'INTERACTIVE']),
+    );
+    const welcome = await Message.findOne({ direction: 'OUTBOUND', messageType: 'INTERACTIVE' }).lean();
+    expect(welcome?.content).toMatchObject({
+      text: '👋 Thank you for connecting with us!\n\nExplore our range of abrasive and finishing products.',
+      buttons: [
+        { id: 'explore_products', title: 'Explore Our Products' },
+        { id: 'connect_sales', title: 'Connect With Team' },
+      ],
+    });
   });
 
   it('counts unique product interests atomically and sends the third-interest prompt once', async () => {
@@ -335,6 +731,7 @@ describe('catalogue automation', () => {
       await automationService.processIncoming(inbound(`msg-${product.id}`, `product:${product.id}`));
     }
     await automationService.processIncoming(inbound('msg-repeat', `product:${products[0]!.id}`));
+    await deliverPendingActions();
 
     const conversation = await Conversation.findOne();
     expect(conversation?.uniqueProductCount).toBe(3);
@@ -356,7 +753,40 @@ describe('catalogue automation', () => {
     });
     const conversation = await Conversation.findOne();
     expect(conversation?.status).toBe('HUMAN_HANDOVER');
+    const lead = await Lead.findOne({ conversationId: conversation?._id });
+    expect(lead).toMatchObject({
+      requirement: 'Customer asked to connect with the sales team',
+    });
     expect(await Lead.countDocuments({ conversationId: conversation?._id })).toBe(1);
+  });
+
+  it('does not continue pending automated messages after sales handover', async () => {
+    let counter = 0;
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      return new Response(JSON.stringify({ messages: [{ id: `wamid.handover.pending.${++counter}` }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const inbound = (id: string, selection?: string) => ({
+      id,
+      from: '15550003336',
+      timestamp: String(Math.floor(Date.now() / 1000)),
+      type: selection ? 'interactive' : 'text',
+      ...(selection
+        ? { interactive: { button_reply: { id: selection, title: selection } } }
+        : { text: { body: 'Hello' } }),
+    });
+
+    await automationService.processIncoming(inbound('msg-before-handover'));
+    const welcomeImage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'IMAGE' }).lean();
+    await automationService.processIncoming(inbound('msg-connect-sales', 'connect_sales'));
+    expect((await Conversation.findOne())?.status).toBe('HUMAN_HANDOVER');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await markDelivered(welcomeImage!.whatsappMessageId!);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(await Message.countDocuments({ direction: 'OUTBOUND', messageType: 'INTERACTIVE' })).toBe(0);
   });
 
   it('reuses one customer lead when a returning customer hands over a later conversation', async () => {
@@ -396,20 +826,38 @@ describe('catalogue automation', () => {
     );
     expect(refreshedLead?.visitHistory).toHaveLength(1);
     expect(refreshedLead?.visitHistory[0]?.whatsappMessageId).toBe('msg-returning-handover');
+    expect(refreshedLead?.requirement).toBe('Customer asked to connect with the sales team');
     expect(refreshedLead?.adminReadAt).toBeUndefined();
   });
 
-  it('keeps handover messages with sales while refreshing conversation activity', async () => {
+  it('restarts automation when a customer messages after sales handover', async () => {
     const customer = await Customer.create({ whatsappId: '15550003334', phoneNumber: '15550003334' });
+    const product = await Product.create({
+      name: 'Handover Product',
+      slug: 'handover-product',
+      description: 'Verified product description',
+      category: 'Flap Disc',
+    });
     const previousActivity = new Date(Date.now() - 2 * 60 * 60 * 1000);
     const conversation = await Conversation.create({
       customerId: customer._id,
       status: 'HUMAN_HANDOVER',
       currentStep: 'HUMAN_HANDOVER',
+      selectedProductIds: [product._id],
+      uniqueProductCount: 1,
+      interestTriggeredAt: previousActivity,
+      interestPromptStatus: 'SENT',
+      handoverAt: previousActivity,
       lastMessageAt: previousActivity,
       lastInteractionAt: previousActivity,
     });
-    const fetchMock = jest.spyOn(global, 'fetch');
+    let counter = 0;
+    const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      return new Response(JSON.stringify({ messages: [{ id: `wamid.handover.restart.${++counter}` }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
     const receivedAt = new Date(Math.floor(Date.now() / 1000) * 1000);
 
     await automationService.processIncoming({
@@ -421,12 +869,26 @@ describe('catalogue automation', () => {
     });
 
     const updatedConversation = await Conversation.findById(conversation._id);
-    expect(updatedConversation?.status).toBe('HUMAN_HANDOVER');
+    expect(updatedConversation?.status).toBe('OPEN');
+    expect(updatedConversation?.currentStep).toBe('WELCOME_SENT');
+    expect(updatedConversation?.selectedProductIds).toHaveLength(0);
+    expect(updatedConversation?.uniqueProductCount).toBe(0);
+    expect(updatedConversation?.interestTriggeredAt).toBeUndefined();
+    expect(updatedConversation?.interestPromptStatus).toBeUndefined();
+    expect(updatedConversation?.handoverAt).toBeUndefined();
     expect(updatedConversation?.lastMessageAt).toEqual(receivedAt);
     expect(updatedConversation?.lastInteractionAt).toEqual(receivedAt);
     expect(await Message.countDocuments({ conversationId: conversation._id, direction: 'INBOUND' })).toBe(1);
-    expect(await Message.countDocuments({ conversationId: conversation._id, direction: 'OUTBOUND' })).toBe(0);
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await Message.countDocuments({ conversationId: conversation._id, direction: 'OUTBOUND' })).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      type: 'image',
+      image: { link: new URL('/ncut-welcome-message-v2.jpg', env.FRONTEND_URL).toString() },
+    });
+    const welcomeImage = await Message.findOne({ conversationId: conversation._id, messageType: 'IMAGE' }).lean();
+    await markDelivered(welcomeImage!.whatsappMessageId!);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({ type: 'interactive' });
   });
 
   it('records an opt-out and stops subsequent automation', async () => {
@@ -556,11 +1018,38 @@ describe('catalogue automation', () => {
     expect((await Message.findById(outbound?._id))?.status).toBe('DELIVERED');
   });
 
+  it('does not send delivery-gated messages when their media fails', async () => {
+    fakeMetaSend();
+    await automationService.processIncoming({
+      id: 'msg-media-failed',
+      from: '15550009998',
+      timestamp: String(Math.floor(Date.now() / 1000)),
+      type: 'text',
+      text: { body: 'Hello' },
+    });
+    const image = await Message.findOne({ direction: 'OUTBOUND', messageType: 'IMAGE' });
+    await WebhookEvent.create({
+      eventId: `status:${image?.whatsappMessageId}:failed`,
+      eventType: 'status',
+      payload: {
+        id: image?.whatsappMessageId,
+        status: 'failed',
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        errors: [{ code: 131026, title: 'Message undeliverable' }],
+      },
+    });
+    await processPendingWebhookEvents();
+    const failedImage = await Message.findById(image?._id);
+    expect(failedImage?.status).toBe('FAILED');
+    expect(failedImage?.deliveryActionStatus).toBe('FAILED');
+    expect(await Message.countDocuments({ direction: 'OUTBOUND' })).toBe(1);
+  });
+
   it('retries a failed third-product prompt without incrementing the product count again', async () => {
     let counter = 0;
     jest.spyOn(global, 'fetch').mockImplementation(async () => {
       counter += 1;
-      if (counter === 8) {
+      if (counter === 9) {
         return new Response(JSON.stringify({ error: { message: 'Temporary API failure' } }), { status: 500 });
       }
       return new Response(JSON.stringify({ messages: [{ id: `wamid.retry.${counter}` }] }), {
@@ -587,16 +1076,22 @@ describe('catalogue automation', () => {
       type: 'text',
       text: { body: 'Hello' },
     });
+    await deliverPendingActions();
     await automationService.processIncoming(createSelection('retry-a-msg', products[0]!.id));
+    await deliverPendingActions();
     await automationService.processIncoming(createSelection('retry-b-msg', products[1]!.id));
-    await expect(
-      automationService.processIncoming(createSelection('retry-c-msg', products[2]!.id)),
-    ).rejects.toMatchObject({
-      statusCode: 502,
-    });
+    await deliverPendingActions();
+    await automationService.processIncoming(createSelection('retry-c-msg', products[2]!.id));
+    await deliverPendingActions();
     expect((await Conversation.findOne())?.interestPromptStatus).toBe('PENDING');
 
-    await automationService.processIncoming(createSelection('retry-c-again', products[2]!.id));
+    const pendingNextSteps = await Message.findOne({
+      direction: 'OUTBOUND',
+      deliveryActionStatus: 'PENDING',
+      'content.text': 'What would you like to do next?',
+    }).lean();
+    expect(pendingNextSteps?.whatsappMessageId).toBeTruthy();
+    await markDelivered(pendingNextSteps!.whatsappMessageId!);
     const conversation = await Conversation.findOne();
     expect(conversation?.uniqueProductCount).toBe(3);
     expect(conversation?.interestPromptStatus).toBe('SENT');

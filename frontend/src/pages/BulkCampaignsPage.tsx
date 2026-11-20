@@ -73,9 +73,13 @@ export function BulkCampaignsPage() {
   });
   const deleteCampaign = useMutation({
     mutationFn: async (id: string) => api.delete(`/bulk-campaigns/${id}`),
-    onSuccess: async (_response, id) => {
+    onSuccess: async (response, id) => {
       setCampaignToDelete(undefined);
-      setNotice('Unsent campaign preview deleted. Delivery history for sent campaigns is retained.');
+      setNotice(
+        response.data.data.deletionPending
+          ? 'Campaign cancelled. Any message already being sent will finish before its campaign records are removed.'
+          : 'Campaign deleted. Sent messages remain in conversation history.',
+      );
       if (selectedId === id) setSelectedId('');
       if (draftId === id) setDraftId('');
       client.removeQueries({ queryKey: ['bulk-campaign', id] });
@@ -354,7 +358,6 @@ export function BulkCampaignsPage() {
           {campaigns.isLoading ? <p className="form-hint">Loading campaign history…</p> : (campaigns.data?.items ?? []).length ? (
             <div className="campaign-history-list">
               {(campaigns.data?.items ?? []).map((campaign) => {
-                const canDelete = ['DRAFT', 'READY'].includes(String(campaign.status));
                 return (
                   <div className="campaign-history-row" key={campaign._id}>
                     <button
@@ -368,21 +371,19 @@ export function BulkCampaignsPage() {
                       </span>
                       <span className="campaign-history-count">{Number(campaign.eligibleRecipients ?? 0)} eligible</span>
                     </button>
-                    {canDelete && (
-                      <button
-                        type="button"
-                        className="campaign-delete-button"
-                        title="Delete this unsent preview and its recipient preview rows"
-                        aria-label={`Delete unsent campaign ${String(campaign.name)}`}
-                        disabled={deleteCampaign.isPending}
-                        onClick={() => {
-                          deleteCampaign.reset();
-                          setCampaignToDelete(campaign);
-                        }}
-                      >
-                        Delete
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      className="campaign-delete-button"
+                      title={`Delete ${String(campaign.status).toLowerCase()} campaign`}
+                      aria-label={`Delete campaign ${String(campaign.name)} (${String(campaign.status)})`}
+                      disabled={deleteCampaign.isPending}
+                      onClick={() => {
+                        deleteCampaign.reset();
+                        setCampaignToDelete(campaign);
+                      }}
+                    >
+                      Delete
+                    </button>
                   </div>
                 );
               })}
@@ -403,11 +404,25 @@ export function BulkCampaignsPage() {
         <section className="panel campaign-detail">
           <div className="panel-heading campaign-detail-heading">
             <div><div className="eyebrow">DELIVERY ACTIVITY</div><h2>{String(selectedCampaign.name)}</h2><p>{String(selectedCampaign.status)} · Created {dateLabel(selectedCampaign.createdAt)}</p></div>
-            {isReady && (
-              <button type="button" className="primary-button" disabled={busy || Number(selectedCampaign.eligibleRecipients ?? 0) < 1} onClick={() => setConfirmSend(true)}>
-                Send to {Number(selectedCampaign.eligibleRecipients ?? 0)} eligible
+            <div className="campaign-detail-actions">
+              <button
+                type="button"
+                className="campaign-delete-button"
+                title={`Delete ${String(selectedCampaign.status).toLowerCase()} campaign`}
+                disabled={deleteCampaign.isPending}
+                onClick={() => {
+                  deleteCampaign.reset();
+                  setCampaignToDelete(selectedCampaign);
+                }}
+              >
+                Delete campaign
               </button>
-            )}
+              {isReady && (
+                <button type="button" className="primary-button" disabled={busy || Number(selectedCampaign.eligibleRecipients ?? 0) < 1} onClick={() => setConfirmSend(true)}>
+                  Send to {Number(selectedCampaign.eligibleRecipients ?? 0)} eligible
+                </button>
+              )}
+            </div>
           </div>
           {isReady && (
             <div className="campaign-preview-notice">
@@ -463,9 +478,9 @@ export function BulkCampaignsPage() {
       )}
       {campaignToDelete && (
         <ConfirmDialog
-          title="Delete unsent campaign preview?"
-          message={`This permanently deletes “${String(campaignToDelete.name)}” and its recipient preview rows. Sent message records and system activity history are retained. Campaigns that have started sending cannot be deleted.`}
-          confirmLabel="Delete preview"
+          title="Delete campaign?"
+          message={`This deletes “${String(campaignToDelete.name)}” and its recipient records for every campaign status. If it is queued or processing, sending will be cancelled; a message already in progress may finish before deletion completes. Sent WhatsApp messages remain in conversation history.`}
+          confirmLabel="Delete campaign"
           pendingLabel="Deleting…"
           isPending={deleteCampaign.isPending}
           error={deleteCampaign.error instanceof Error ? deleteCampaign.error.message : undefined}

@@ -25,6 +25,7 @@ const productSchema = z.object({
   backing: z.array(z.string().trim()).default([]),
   specifications: z.record(z.string(), z.unknown()).default({}),
   imageUrl: z.string().url().optional().or(z.literal('')),
+  whatsappProductRetailerId: z.string().trim().max(100).optional(),
   isActive: z.boolean().default(true),
 });
 
@@ -45,6 +46,7 @@ const productUpdateSchema = z
     backing: z.array(z.string().trim()).optional(),
     specifications: z.record(z.string(), z.unknown()).optional(),
     imageUrl: z.string().url().optional().or(z.literal('')),
+    whatsappProductRetailerId: z.string().trim().max(100).optional(),
     isActive: z.boolean().optional(),
   })
   .refine((value) => Object.keys(value).length > 0, 'At least one product field must be provided');

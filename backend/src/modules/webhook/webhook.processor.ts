@@ -117,6 +117,15 @@ async function processStatus(payload: Record<string, unknown>): Promise<void> {
     );
     return;
   }
+  if (status === 'failed' && message.direction === 'OUTBOUND' && message.deliveryActionStatus) {
+    await Message.updateOne(
+      { _id: message._id, deliveryActionStatus: { $in: ['PENDING', 'SENDING'] } },
+      {
+        $set: { deliveryActionStatus: 'FAILED' },
+        $unset: { deliveryAction: 1, deliveryActionLockedAt: 1 },
+      },
+    );
+  }
   if (message.bulkRecipientId) {
     const effectiveStatus = String(message.status);
     const update: Record<string, unknown> = { status: effectiveStatus };
@@ -141,6 +150,9 @@ async function processStatus(payload: Record<string, unknown>): Promise<void> {
       { _id: message.bulkRecipientId, ...effectiveGuard },
       { $set: update },
     );
+  }
+  if (message.direction === 'OUTBOUND' && !message.bulkRecipientId && (status === 'delivered' || status === 'read')) {
+    await automationService.continueAfterDelivery(messageId);
   }
 }
 
