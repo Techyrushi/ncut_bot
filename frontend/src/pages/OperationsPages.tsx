@@ -1,6 +1,6 @@
 import { useDeferredValue, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import type { ApiResponse, PageResult } from '../types/api';
 import { useAuth } from '../contexts/AuthContext';
@@ -262,6 +262,7 @@ export function TemplatesPage() {
 
 export function LeadsPage() {
   const client = useQueryClient();
+  const navigate = useNavigate();
   const { user } = useAuth();
   const [search, setSearch] = useState('');
   const deferredSearch = useDeferredValue(search.trim());
@@ -304,6 +305,19 @@ export function LeadsPage() {
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: ['leads'] });
       setAssignmentLead(null);
+    },
+  });
+  const openLeadHistory = useMutation({
+    mutationFn: async ({ leadId, conversationId }: { leadId: string; conversationId: string }) => {
+      await api.patch(`/leads/${leadId}/read`);
+      return conversationId;
+    },
+    onSuccess: async (conversationId) => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['leads'] }),
+        client.invalidateQueries({ queryKey: ['unread-leads-count'] }),
+      ]);
+      navigate(`/conversations?conversation=${encodeURIComponent(conversationId)}`);
     },
   });
   const addSalesRepAndAssign = useMutation({
@@ -413,6 +427,11 @@ export function LeadsPage() {
             {exportLeads.error instanceof Error ? exportLeads.error.message : 'Unable to export matching leads.'}
           </div>
         )}
+        {openLeadHistory.isError && (
+          <div className="alert error" role="alert">
+            {openLeadHistory.error instanceof Error ? openLeadHistory.error.message : 'Unable to open lead chat history.'}
+          </div>
+        )}
         <div className="table-toolbar leads-toolbar">
           <label className="table-search">
             <span aria-hidden="true">⌕</span>
@@ -512,7 +531,12 @@ export function LeadsPage() {
                 <tr key={lead._id}>
                   <td>
                     <div className="lead-customer-cell">
-                      <strong>{display(lead.customerId)}</strong>
+                      <strong>
+                        {display(lead.customerId)}
+                        {lead.isUnreadLead === true && (
+                          <span className="lead-new-indicator" title="New lead activity" aria-label="New lead activity" />
+                        )}
+                      </strong>
                       <span>{customerPhone(lead.customerId) || 'WhatsApp number unavailable'}</span>
                     </div>
                   </td>
@@ -525,6 +549,7 @@ export function LeadsPage() {
                       <button
                         type="button"
                         className="secondary-button lead-assign-button"
+                        title="Assign this lead to an active sales representative"
                         onClick={() => {
                           setAssignmentLead(lead);
                           setAssignmentUserId(getId(lead.assignedSalesPerson));
@@ -542,6 +567,7 @@ export function LeadsPage() {
                   <td>
                     <select
                       aria-label={`Update status for ${display(lead.customerId)}`}
+                      title="Change lead status"
                       value={String(lead.status)}
                       onChange={(e) => update.mutate({ id: lead._id, status: e.target.value })}
                       disabled={update.isPending && update.variables?.id === lead._id}
@@ -560,14 +586,21 @@ export function LeadsPage() {
                   </td>
                   <td>{formatDate(lead.createdAt)}</td>
                   <td>
-                    {typeof lead.conversationId === 'string' && (
-                      <Link
-                        to={`/conversations?conversation=${encodeURIComponent(lead.conversationId)}`}
-                        className="text-button lead-open-link"
-                      >
-                        Open chat
-                      </Link>
-                    )}
+                    <button
+                      type="button"
+                      className="secondary-button lead-history-button"
+                      title="Open the customer’s WhatsApp thread, including messages from previous visits"
+                      disabled={!getId(lead.latestConversationId) || openLeadHistory.isPending}
+                      onClick={() =>
+                        openLeadHistory.mutate({
+                          leadId: lead._id,
+                          conversationId: getId(lead.latestConversationId),
+                        })
+                      }
+                    >
+                      View chat history
+                      <span className="lead-history-count">{Number(lead.chatHistoryCount ?? 0)} visits</span>
+                    </button>
                   </td>
                 </tr>
               ))}

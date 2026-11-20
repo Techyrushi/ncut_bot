@@ -12,7 +12,7 @@ dashboardRouter.get(
   authenticate,
   requireRoles('ADMIN', 'SALES'),
   asyncHandler(async (_req, res) => {
-    const [totalCustomers, conversationStats, productSelections, totalLeads, pendingLeads] =
+    const [totalCustomers, conversationStats, productSelections, leadStats] =
       await Promise.all([
         Customer.countDocuments(),
         Conversation.aggregate([
@@ -36,8 +36,31 @@ dashboardRouter.get(
           { $group: { _id: { customerId: '$customerId', productId: '$selectedProductIds' } } },
           { $count: 'total' },
         ]),
-        Lead.countDocuments(),
-        Lead.countDocuments({ status: 'NEW' }),
+        Lead.aggregate([
+          {
+            $lookup: {
+              from: Customer.collection.name,
+              localField: 'customerId',
+              foreignField: '_id',
+              as: 'customer',
+            },
+          },
+          { $unwind: '$customer' },
+          {
+            $addFields: {
+              phoneIdentity: { $ifNull: ['$customer.phoneIdentity', '$customer._id'] },
+            },
+          },
+          { $sort: { updatedAt: -1, createdAt: -1 } },
+          { $group: { _id: '$phoneIdentity', status: { $first: '$status' } } },
+          {
+            $group: {
+              _id: null,
+              totalLeads: { $sum: 1 },
+              pendingLeads: { $sum: { $cond: [{ $eq: ['$status', 'NEW'] }, 1, 0] } },
+            },
+          },
+        ]),
       ]);
     res.json({
       success: true,
@@ -45,8 +68,8 @@ dashboardRouter.get(
         totalCustomers,
         totalConversations: conversationStats[0]?.totalConversations ?? 0,
         totalProductSelections: productSelections[0]?.total ?? 0,
-        totalLeads,
-        pendingLeads,
+        totalLeads: leadStats[0]?.totalLeads ?? 0,
+        pendingLeads: leadStats[0]?.pendingLeads ?? 0,
         humanHandovers: conversationStats[0]?.humanHandovers ?? 0,
       },
     });

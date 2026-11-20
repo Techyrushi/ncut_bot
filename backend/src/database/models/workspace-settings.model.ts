@@ -8,6 +8,7 @@ const workspaceSettingsSchema = new Schema(
     key: { type: String, enum: ['workspace'], default: 'workspace', unique: true },
     businessPhoneNumber: { type: String, trim: true, maxlength: 30, default: '' },
     welcomeMessage: { type: String, trim: true, maxlength: 1024, default: DEFAULT_WELCOME_MESSAGE },
+    leadNotificationSetupAt: { type: Date },
     updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
   },
   { timestamps: true },

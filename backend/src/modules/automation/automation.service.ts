@@ -2,7 +2,7 @@ import mongoose, { Types } from 'mongoose';
 import { env } from '../../config/env';
 import { logger } from '../../config/logger';
 import { Conversation } from '../../database/models/conversation.model';
-import { Customer } from '../../database/models/customer.model';
+import { Customer, normalizePhoneIdentity } from '../../database/models/customer.model';
 import { Lead } from '../../database/models/lead.model';
 import { Message } from '../../database/models/message.model';
 import { Product } from '../../database/models/product.model';
@@ -52,6 +52,7 @@ export class AutomationService {
         $set: {
           ...(message.from ? { phoneNumber: message.from } : {}),
           ...(profileName ? { profileName } : {}),
+          phoneIdentity: normalizePhoneIdentity(message.from ?? customerIdentity),
         },
         $setOnInsert: { optInStatus: 'UNKNOWN' },
       },
@@ -74,7 +75,7 @@ export class AutomationService {
         return;
       }
       if (this.selection(message)?.id === 'connect_sales') {
-        await this.handover(customer._id, conversation._id, recipient);
+        await this.handover(customer._id, conversation._id, recipient, message.id, receivedAt);
       }
       return;
     }
@@ -157,7 +158,7 @@ export class AutomationService {
       }
       return;
     }
-    await this.handleSelection(input.id, customer._id, conversation, recipient);
+    await this.handleSelection(input.id, customer._id, conversation, recipient, message.id, receivedAt);
   }
 
   private selection(message: IncomingMessage): { id: string } | undefined {
@@ -210,6 +211,8 @@ export class AutomationService {
     customerId: Types.ObjectId,
     conversation: { _id: Types.ObjectId; currentStep: string; selectedProductIds: Types.ObjectId[] },
     to: string,
+    inboundMessageId: string,
+    occurredAt: Date,
   ): Promise<void> {
     if (id === 'explore_products') {
       await this.sendProducts(undefined, customerId, conversation._id, to, 0);
@@ -220,7 +223,7 @@ export class AutomationService {
       return;
     }
     if (id === 'connect_sales') {
-      await this.handover(customerId, conversation._id, to);
+      await this.handover(customerId, conversation._id, to, inboundMessageId, occurredAt);
       return;
     }
     if (id.startsWith('category:')) {
@@ -454,7 +457,13 @@ export class AutomationService {
     logger.debug({ productId, uniqueSelection: Boolean(update.modifiedCount) }, 'Product selection processed');
   }
 
-  private async handover(customerId: Types.ObjectId, conversationId: Types.ObjectId, to: string): Promise<void> {
+  private async handover(
+    customerId: Types.ObjectId,
+    conversationId: Types.ObjectId,
+    to: string,
+    inboundMessageId: string,
+    occurredAt: Date,
+  ): Promise<void> {
     const conversation = await Conversation.findById(conversationId);
     if (!conversation) return;
     if (conversation.status !== 'HUMAN_HANDOVER') {
@@ -463,18 +472,47 @@ export class AutomationService {
       conversation.handoverAt = new Date();
       await conversation.save();
     }
-    const lead = await Lead.findOneAndUpdate(
-      { conversationId },
-      {
-        $setOnInsert: {
-          customerId,
-          conversationId,
-          selectedProducts: conversation.selectedProductIds,
-          status: 'NEW',
+    const customer = await Customer.findById(customerId).select('phoneNumber whatsappId');
+    if (!customer) throw new Error('Unable to locate the customer for sales handover');
+    const phoneIdentity = normalizePhoneIdentity(customer.phoneNumber || customer.whatsappId);
+    const customerIds = phoneIdentity
+      ? await Customer.find({ phoneIdentity }).distinct('_id')
+      : [customer._id];
+    let lead = await Lead.findOne({ customerId: { $in: customerIds } }).sort({ updatedAt: -1 });
+    if (lead) {
+      lead = await Lead.findOneAndUpdate(
+        { _id: lead._id },
+        {
+          $addToSet: {
+            conversationHistory: conversationId,
+            selectedProducts: { $each: conversation.selectedProductIds },
+            visitHistory: {
+              whatsappMessageId: inboundMessageId,
+              conversationId,
+              occurredAt,
+            },
+          },
+          $unset: { adminReadAt: 1 },
         },
-      },
-      { upsert: true, new: true },
-    );
+        { new: true },
+      );
+    } else {
+      lead = await Lead.findOneAndUpdate(
+        { conversationId },
+        {
+          $setOnInsert: {
+            customerId,
+            conversationId,
+            conversationHistory: [conversationId],
+            visitHistory: [{ whatsappMessageId: inboundMessageId, conversationId, occurredAt }],
+            selectedProducts: conversation.selectedProductIds,
+            status: 'NEW',
+          },
+        },
+        { upsert: true, new: true },
+      );
+    }
+    if (!lead) throw new Error('Unable to create or locate the customer lead');
     if (lead.notificationStatus !== 'SENT') {
       const notifyBody = JSON.stringify({
         event: 'lead.created',

@@ -1,9 +1,11 @@
 import { Router } from 'express';
+import { Types, type PipelineStage } from 'mongoose';
 import { z } from 'zod';
 import { Customer } from '../../database/models/customer.model';
 import { Lead } from '../../database/models/lead.model';
 import { Product } from '../../database/models/product.model';
 import { User } from '../../database/models/user.model';
+import { Conversation } from '../../database/models/conversation.model';
 import { authenticate, requireRoles } from '../../middleware/auth';
 import { asyncHandler } from '../../utils/async-handler';
 import { ApiError } from '../../utils/api-error';
@@ -18,6 +20,7 @@ const leadFiltersSchema = z.object({
   search: z.string().trim().max(200).optional(),
   startDate: z.string().date().optional(),
   endDate: z.string().date().optional(),
+  unread: z.enum(['true', 'false']).optional(),
 });
 
 function escapedRegex(value: string): RegExp {
@@ -31,6 +34,7 @@ async function buildLeadFilter(query: Record<string, unknown>): Promise<Record<s
     search: query.search,
     startDate: query.startDate,
     endDate: query.endDate,
+    unread: query.unread,
   });
   if (filters.startDate && filters.endDate && filters.startDate > filters.endDate) {
     throw new ApiError(400, 'Start date must be on or before end date', 'INVALID_DATE_RANGE');
@@ -38,6 +42,7 @@ async function buildLeadFilter(query: Record<string, unknown>): Promise<Record<s
 
   const clauses: Record<string, unknown>[] = [];
   if (filters.status) clauses.push({ status: filters.status });
+  if (filters.unread === 'true') clauses.push({ adminReadAt: { $exists: false } });
   if (filters.assignedSalesPerson === 'unassigned') {
     clauses.push({
       $or: [{ assignedSalesPerson: { $exists: false } }, { assignedSalesPerson: null }],
@@ -45,7 +50,7 @@ async function buildLeadFilter(query: Record<string, unknown>): Promise<Record<s
   } else if (filters.assignedSalesPerson === 'assigned') {
     clauses.push({ assignedSalesPerson: { $exists: true, $ne: null } });
   } else if (filters.assignedSalesPerson) {
-    clauses.push({ assignedSalesPerson: filters.assignedSalesPerson });
+    clauses.push({ assignedSalesPerson: new Types.ObjectId(filters.assignedSalesPerson) });
   }
   if (filters.startDate || filters.endDate) {
     clauses.push({
@@ -66,7 +71,7 @@ async function buildLeadFilter(query: Record<string, unknown>): Promise<Record<s
         { customerId: { $in: customers } },
         { selectedProducts: { $in: products } },
         { requirement: regex },
-        ...(filters.search.match(/^[a-f\d]{24}$/i) ? [{ _id: filters.search }] : []),
+        ...(filters.search.match(/^[a-f\d]{24}$/i) ? [{ _id: new Types.ObjectId(filters.search) }] : []),
       ],
     });
   }
@@ -113,6 +118,127 @@ const populatedLeadFields = (filter: Record<string, unknown> = {}) =>
     .populate('selectedProducts', 'name category')
     .populate('assignedSalesPerson', 'name email isActive');
 
+type LeadGroup = {
+  _id: string | Types.ObjectId;
+  leadId: Types.ObjectId;
+  customerIds: Types.ObjectId[];
+  leadHistory: Array<{ leadId: Types.ObjectId; conversationId: Types.ObjectId; status: string; createdAt: Date }>;
+  visitHistory: Array<Array<{ whatsappMessageId: string; conversationId: Types.ObjectId; occurredAt: Date }>>;
+  isUnreadLead: number;
+};
+
+function phoneIdentityStages(): PipelineStage[] {
+  return [
+    {
+      $lookup: {
+        from: Customer.collection.name,
+        localField: 'customerId',
+        foreignField: '_id',
+        as: 'customer',
+      },
+    },
+    { $unwind: '$customer' },
+    {
+      $addFields: {
+        phoneIdentity: { $ifNull: ['$customer.phoneIdentity', '$customer._id'] },
+      },
+    },
+  ];
+}
+
+async function getLeadGroups(
+  filter: Record<string, unknown>,
+  page?: { skip: number; limit: number },
+): Promise<{ items: Array<Record<string, unknown>>; total: number }> {
+  const facets = await Lead.aggregate<{
+    items: LeadGroup[];
+    total: Array<{ count: number }>;
+  }>([
+    { $match: filter },
+    ...phoneIdentityStages(),
+    { $sort: { updatedAt: -1, createdAt: -1 } },
+    {
+      $group: {
+        _id: '$phoneIdentity',
+        leadId: { $first: '$_id' },
+        latestUpdatedAt: { $first: '$updatedAt' },
+        customerIds: { $addToSet: '$customerId' },
+        leadHistory: {
+          $push: {
+            leadId: '$_id',
+            conversationId: '$conversationId',
+            status: '$status',
+            createdAt: '$createdAt',
+          },
+        },
+        visitHistory: { $push: { $ifNull: ['$visitHistory', []] } },
+        isUnreadLead: {
+          $max: {
+            $cond: [{ $eq: [{ $ifNull: ['$adminReadAt', null] }, null] }, 1, 0],
+          },
+        },
+      },
+    },
+    { $sort: { latestUpdatedAt: -1 } },
+    {
+      $facet: {
+        items: page ? [{ $skip: page.skip }, { $limit: page.limit }] : [{ $match: {} }],
+        total: [{ $count: 'count' }],
+      },
+    },
+  ]);
+  const groups = facets[0]?.items ?? [];
+  const leadIds = groups.map((group) => group.leadId);
+  const customerIds = groups.flatMap((group) => group.customerIds);
+  const [leads, conversations] = await Promise.all([
+    leadIds.length ? populatedLeadFields({ _id: { $in: leadIds } }).lean() : [],
+    customerIds.length
+      ? Conversation.aggregate<{
+          _id: string;
+          latestConversationId: Types.ObjectId;
+          chatHistoryCount: number;
+        }>([
+          { $match: { customerId: { $in: customerIds } } },
+          ...phoneIdentityStages(),
+          {
+            $addFields: {
+              activePriority: { $cond: [{ $in: ['$status', ['OPEN', 'HUMAN_HANDOVER']] }, 1, 0] },
+            },
+          },
+          { $sort: { phoneIdentity: 1, activePriority: -1, lastMessageAt: -1, updatedAt: -1 } },
+          {
+            $group: {
+              _id: '$phoneIdentity',
+              latestConversationId: { $first: '$_id' },
+              chatHistoryCount: { $sum: 1 },
+            },
+          },
+        ])
+      : [],
+  ]);
+  const leadById = new Map(leads.map((lead) => [String(lead._id), lead as Record<string, unknown>]));
+  const conversationByPhone = new Map(conversations.map((row) => [String(row._id), row]));
+  const items = groups.flatMap((group) => {
+    const lead = leadById.get(String(group.leadId));
+    if (!lead) return [];
+    const history = conversationByPhone.get(String(group._id));
+    const visitIds = new Set(
+      group.visitHistory
+        .flat()
+        .map((visit) => visit.whatsappMessageId)
+        .filter(Boolean),
+    );
+    return [{
+      ...lead,
+      isUnreadLead: group.isUnreadLead === 1,
+      leadHistory: group.leadHistory,
+      chatHistoryCount: visitIds.size || history?.chatHistoryCount || 0,
+      latestConversationId: history?.latestConversationId ?? lead.conversationId,
+    }];
+  });
+  return { items, total: facets[0]?.total[0]?.count ?? 0 };
+}
+
 export const leadsRouter = Router();
 
 leadsRouter.get(
@@ -121,7 +247,7 @@ leadsRouter.get(
   requireRoles('ADMIN', 'SALES'),
   asyncHandler(async (req, res) => {
     const filter = await buildLeadFilter(req.query as Record<string, unknown>);
-    const leads = await populatedLeadFields(filter).sort({ createdAt: -1 }).lean();
+    const { items: leads } = await getLeadGroups(filter);
     const header = [
       'Lead ID',
       'Customer',
@@ -153,15 +279,29 @@ leadsRouter.get(
     const page = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
     const filter = await buildLeadFilter(req.query as Record<string, unknown>);
-    const [items, total] = await Promise.all([
-      populatedLeadFields(filter)
-        .sort({ createdAt: -1 })
-        .skip((page - 1) * limit)
-        .limit(limit)
-        .lean(),
-      Lead.countDocuments(filter),
-    ]);
+    const { items, total } = await getLeadGroups(filter, { skip: (page - 1) * limit, limit });
     res.json({ success: true, data: { items, page, limit, total } });
+  }),
+);
+
+leadsRouter.patch(
+  '/:id/read',
+  authenticate,
+  requireRoles('ADMIN', 'SALES'),
+  asyncHandler(async (req, res) => {
+    const lead = await Lead.findById(req.params.id).select('customerId');
+    if (!lead) throw new ApiError(404, 'Lead not found', 'NOT_FOUND');
+    const customer = await Customer.findById(lead.customerId).select('phoneNumber whatsappId phoneIdentity');
+    if (!customer) throw new ApiError(404, 'Lead customer not found', 'NOT_FOUND');
+    const customers = await Customer.find(
+      customer.phoneIdentity ? { phoneIdentity: customer.phoneIdentity } : { _id: customer._id },
+    ).distinct('_id');
+    const readAt = new Date();
+    await Lead.updateMany(
+      { customerId: { $in: customers } },
+      { $set: { adminReadAt: readAt } },
+    );
+    res.json({ success: true, data: { readAt } });
   }),
 );
 

@@ -336,6 +336,46 @@ describe('catalogue automation', () => {
     expect(await Lead.countDocuments({ conversationId: conversation?._id })).toBe(1);
   });
 
+  it('reuses one customer lead when a returning customer hands over a later conversation', async () => {
+    fakeMetaSend();
+    const customer = await Customer.create({ whatsappId: '15550003335', phoneNumber: '15550003335' });
+    const previousConversation = await Conversation.create({
+      customerId: customer._id,
+      status: 'CLOSED',
+      currentStep: 'CLOSED',
+    });
+    const lead = await Lead.create({
+      customerId: customer._id,
+      conversationId: previousConversation._id,
+      conversationHistory: [previousConversation._id],
+      status: 'CONTACTED',
+      adminReadAt: new Date(),
+    });
+    const returningConversation = await Conversation.create({
+      customerId: customer._id,
+      status: 'OPEN',
+      currentStep: 'WELCOME_SENT',
+    });
+
+    await automationService.processIncoming({
+      id: 'msg-returning-handover',
+      from: customer.whatsappId,
+      timestamp: String(Math.floor(Date.now() / 1000)),
+      type: 'interactive',
+      interactive: { button_reply: { id: 'connect_sales', title: 'Connect With Our Team' } },
+    });
+
+    const refreshedLead = await Lead.findById(lead._id);
+    expect(await Lead.countDocuments({ customerId: customer._id })).toBe(1);
+    expect(refreshedLead?.status).toBe('CONTACTED');
+    expect(refreshedLead?.conversationHistory.map(String)).toEqual(
+      expect.arrayContaining([String(previousConversation._id), String(returningConversation._id)]),
+    );
+    expect(refreshedLead?.visitHistory).toHaveLength(1);
+    expect(refreshedLead?.visitHistory[0]?.whatsappMessageId).toBe('msg-returning-handover');
+    expect(refreshedLead?.adminReadAt).toBeUndefined();
+  });
+
   it('keeps handover messages with sales while refreshing conversation activity', async () => {
     const customer = await Customer.create({ whatsappId: '15550003334', phoneNumber: '15550003334' });
     const previousActivity = new Date(Date.now() - 2 * 60 * 60 * 1000);

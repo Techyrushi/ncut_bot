@@ -4,6 +4,20 @@ const leadSchema = new Schema(
   {
     customerId: { type: Schema.Types.ObjectId, ref: 'Customer', required: true, index: true },
     conversationId: { type: Schema.Types.ObjectId, ref: 'Conversation', required: true },
+    conversationHistory: { type: [{ type: Schema.Types.ObjectId, ref: 'Conversation' }], default: [] },
+    visitHistory: {
+      type: [
+        new Schema(
+          {
+            whatsappMessageId: { type: String, required: true },
+            conversationId: { type: Schema.Types.ObjectId, ref: 'Conversation', required: true },
+            occurredAt: { type: Date, required: true },
+          },
+          { _id: false },
+        ),
+      ],
+      default: [],
+    },
     selectedProducts: [{ type: Schema.Types.ObjectId, ref: 'Product' }],
     assignedSalesPerson: { type: Schema.Types.ObjectId, ref: 'User', index: true },
     status: {
@@ -14,6 +28,7 @@ const leadSchema = new Schema(
     },
     notificationStatus: { type: String, enum: ['PENDING', 'SENT', 'FAILED'], default: 'PENDING' },
     notificationSentAt: { type: Date },
+    adminReadAt: { type: Date },
     requirement: { type: String, trim: true, maxlength: 5000 },
   },
   { timestamps: true },
@@ -21,6 +36,7 @@ const leadSchema = new Schema(
 
 leadSchema.index({ status: 1, createdAt: -1 });
 leadSchema.index({ conversationId: 1 }, { unique: true });
+leadSchema.index({ customerId: 1, updatedAt: -1 });
 
 export type LeadDocument = InferSchemaType<typeof leadSchema>;
 export const Lead = model('Lead', leadSchema);

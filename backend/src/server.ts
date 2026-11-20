@@ -8,9 +8,14 @@ import { startWebhookWorker } from './modules/webhook/webhook.processor';
 import { initializeAdminUser } from './modules/auth/bootstrap';
 import { recordSystemActivity } from './modules/logs/activity-log';
 import { recoverInterruptedCampaignSends, startBulkCampaignWorker } from './modules/bulk-campaigns/bulk-campaign.service';
+import { Lead } from './database/models/lead.model';
+import { WorkspaceSettings } from './database/models/workspace-settings.model';
+import { Customer, normalizePhoneIdentity } from './database/models/customer.model';
 
 async function start(): Promise<void> {
   await connectDatabase();
+  await backfillCustomerPhoneIdentity();
+  await initializeLeadReadTracking();
   await initializeAdminUser();
   await recoverInterruptedCampaignSends();
   await recordSystemActivity('API_STARTED', 'Backend connected to the database and started');
@@ -22,6 +27,44 @@ async function start(): Promise<void> {
     logger.info({ host: env.HOST, port: env.PORT }, 'HTTP server listening'),
   );
   registerShutdown(server, worker, campaignWorker);
+}
+
+async function backfillCustomerPhoneIdentity(): Promise<void> {
+  const operations: Array<{
+    updateOne: { filter: { _id: unknown }; update: { $set: { phoneIdentity: string } } };
+  }> = [];
+  const flush = async (): Promise<void> => {
+    if (!operations.length) return;
+    await Customer.bulkWrite(operations.splice(0));
+  };
+  for await (const customer of Customer.find({ phoneIdentity: { $exists: false } })
+    .select('_id phoneNumber whatsappId')
+    .cursor()) {
+    const phoneIdentity = normalizePhoneIdentity(customer.phoneNumber || customer.whatsappId);
+    if (!phoneIdentity) continue;
+    operations.push({
+      updateOne: {
+        filter: { _id: customer._id },
+        update: { $set: { phoneIdentity } },
+      },
+    });
+    if (operations.length >= 500) await flush();
+  }
+  await flush();
+}
+
+async function initializeLeadReadTracking(): Promise<void> {
+  const settings = await WorkspaceSettings.findOne({ key: 'workspace' }).select('leadNotificationSetupAt').lean();
+  if (settings?.leadNotificationSetupAt) return;
+  await Lead.updateMany(
+    { adminReadAt: { $exists: false } },
+    [{ $set: { adminReadAt: { $ifNull: ['$updatedAt', '$createdAt'] } } }],
+  );
+  await WorkspaceSettings.updateOne(
+    { key: 'workspace' },
+    { $set: { leadNotificationSetupAt: new Date() } },
+    { upsert: true },
+  );
 }
 
 function registerShutdown(server: Server, worker: NodeJS.Timeout, campaignWorker: NodeJS.Timeout): void {

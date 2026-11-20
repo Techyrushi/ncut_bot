@@ -341,6 +341,10 @@ it('counts unique customer threads and distinct customer product interests on th
     { whatsappId: '15550001114', phoneNumber: '15550001114' },
     { whatsappId: '15550001115', phoneNumber: '15550001115' },
   ]);
+  const aliasCustomer = await Customer.create({
+    whatsappId: '15550009994',
+    phoneNumber: returningCustomer!.phoneNumber,
+  });
   const flapProductId = new mongoose.Types.ObjectId();
   const padProductId = new mongoose.Types.ObjectId();
   await Conversation.create([
@@ -364,15 +368,40 @@ it('counts unique customer threads and distinct customer product interests on th
       currentStep: 'WELCOME_SENT',
     },
   ]);
+  await Lead.create([
+    {
+      customerId: returningCustomer!._id,
+      conversationId: new mongoose.Types.ObjectId(),
+      status: 'NEW',
+      createdAt: new Date(Date.now() - 60_000),
+      updatedAt: new Date(Date.now() - 60_000),
+    },
+    {
+      customerId: returningCustomer!._id,
+      conversationId: new mongoose.Types.ObjectId(),
+      status: 'WON',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+  ]);
+  await Lead.create({
+    customerId: aliasCustomer._id,
+    conversationId: new mongoose.Types.ObjectId(),
+    status: 'NEW',
+    createdAt: new Date(Date.now() - 120_000),
+    updatedAt: new Date(Date.now() - 120_000),
+  });
 
   const result = await request(app).get('/api/v1/dashboard/stats').set('authorization', `Bearer ${token}`);
 
   expect(result.status).toBe(200);
   expect(result.body.data).toMatchObject({
-    totalCustomers: 2,
+    totalCustomers: 3,
     totalConversations: 2,
     totalProductSelections: 2,
     humanHandovers: 1,
+    totalLeads: 1,
+    pendingLeads: 0,
   });
 });
 
@@ -415,12 +444,12 @@ it('filters and exports accurate lead data and supports status and assignment ch
     notificationStatus: 'SENT',
     requirement: '=2+2',
   });
+  expect((await Customer.findById(customer!._id).select('+phoneIdentity').lean())?.phoneIdentity).toBe('15550001116');
   await Lead.create({
     customerId: otherCustomer!._id,
     conversationId: new mongoose.Types.ObjectId(),
     status: 'NEW',
   });
-
   const filtered = await request(app)
     .get('/api/v1/leads')
     .query({
@@ -487,6 +516,103 @@ it('filters and exports accurate lead data and supports status and assignment ch
     .query({ assignedSalesPerson: 'unassigned' })
     .set('authorization', `Bearer ${token}`);
   expect(unassignedFilter.body.data.total).toBe(2);
+});
+
+it('returns one lead per mobile number with chat history and unread activity', async () => {
+  const admin = await User.create({
+    email: 'admin@example.com',
+    name: 'Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const token = jwt.sign({ role: admin.role, ver: admin.authVersion ?? 0 }, env.JWT_SECRET, {
+    subject: admin.id,
+    jwtid: randomUUID(),
+    expiresIn: '1h',
+  });
+  const [customer, aliasCustomer] = await Customer.create([
+    {
+      whatsappId: '15550001118',
+      phoneNumber: '15550001118',
+      profileName: 'Returning Customer',
+    },
+    {
+      whatsappId: '15550009998',
+      phoneNumber: '+1 (555) 000-1118',
+      profileName: 'Customer Alias',
+    },
+  ]);
+  const [olderConversation, latestConversation, aliasConversation] = await Conversation.create([
+    { customerId: customer!._id, status: 'CLOSED', lastMessageAt: new Date(Date.now() - 120_000) },
+    { customerId: customer!._id, status: 'CLOSED', lastMessageAt: new Date(Date.now() - 60_000) },
+    { customerId: aliasCustomer!._id, status: 'HUMAN_HANDOVER', lastMessageAt: new Date() },
+  ]);
+  await Lead.create([
+    {
+      customerId: customer!._id,
+      conversationId: olderConversation!._id,
+      status: 'CONTACTED',
+      adminReadAt: new Date(Date.now() - 180_000),
+    },
+    {
+      customerId: customer!._id,
+      conversationId: latestConversation!._id,
+      status: 'CONTACTED',
+      adminReadAt: new Date(Date.now() - 180_000),
+    },
+    {
+      customerId: aliasCustomer!._id,
+      conversationId: aliasConversation!._id,
+      status: 'NEW',
+      visitHistory: [
+        {
+          whatsappMessageId: 'visit-first',
+          conversationId: aliasConversation!._id,
+          occurredAt: new Date(Date.now() - 60_000),
+        },
+        {
+          whatsappMessageId: 'visit-second',
+          conversationId: aliasConversation!._id,
+          occurredAt: new Date(),
+        },
+      ],
+    },
+  ]);
+
+  const result = await request(app).get('/api/v1/leads').set('authorization', `Bearer ${token}`);
+  expect(result.status).toBe(200);
+  expect(result.body.data.total).toBe(1);
+  expect(result.body.data.items).toHaveLength(1);
+  expect(result.body.data.items[0]).toMatchObject({
+    isUnreadLead: true,
+    chatHistoryCount: 2,
+    latestConversationId: aliasConversation!.id,
+    leadHistory: expect.arrayContaining([
+      expect.objectContaining({ conversationId: olderConversation!.id }),
+      expect.objectContaining({ conversationId: latestConversation!.id }),
+      expect.objectContaining({ conversationId: aliasConversation!.id }),
+    ]),
+  });
+
+  const unread = await request(app)
+    .get('/api/v1/leads')
+    .query({ unread: 'true', page: 1, limit: 1 })
+    .set('authorization', `Bearer ${token}`);
+  expect(unread.body.data.total).toBe(1);
+
+  const markedRead = await request(app)
+    .patch(`/api/v1/leads/${result.body.data.items[0]._id}/read`)
+    .set('authorization', `Bearer ${token}`);
+  expect(markedRead.status).toBe(200);
+  const afterRead = await request(app)
+    .get('/api/v1/leads')
+    .query({ unread: 'true' })
+    .set('authorization', `Bearer ${token}`);
+  expect(afterRead.body.data.total).toBe(0);
+
+  const exported = await request(app).get('/api/v1/leads/export.csv').set('authorization', `Bearer ${token}`);
+  expect(exported.status).toBe(200);
+  expect(exported.text.match(/Customer Alias/g)).toHaveLength(1);
 });
 
 it('filters and searches customer records with pagination metadata', async () => {

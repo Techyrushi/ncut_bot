@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useDeferredValue, useState, type FormEvent } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
 import type { ApiResponse, PageResult } from '../types/api';
@@ -33,15 +33,28 @@ export function BulkCampaignsPage() {
   const [selectedId, setSelectedId] = useState('');
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [page, setPage] = useState(1);
+  const [historySearch, setHistorySearch] = useState('');
+  const [historyStatus, setHistoryStatus] = useState('ALL');
+  const [historyStartDate, setHistoryStartDate] = useState('');
+  const [historyEndDate, setHistoryEndDate] = useState('');
+  const [historyPage, setHistoryPage] = useState(1);
   const [draftId, setDraftId] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const deferredHistorySearch = useDeferredValue(historySearch);
 
   const campaigns = useQuery({
-    queryKey: ['bulk-campaigns'],
+    queryKey: ['bulk-campaigns', deferredHistorySearch, historyStatus, historyStartDate, historyEndDate, historyPage],
     enabled: user?.role === 'ADMIN',
-    queryFn: async () => (await api.get<ApiResponse<PageResult<CampaignRecord>>>('/bulk-campaigns')).data.data,
+    queryFn: async () => {
+      const params: Record<string, string | number> = { page: historyPage, limit: 10 };
+      if (deferredHistorySearch.trim()) params.search = deferredHistorySearch.trim();
+      if (historyStatus !== 'ALL') params.status = historyStatus;
+      if (historyStartDate) params.startDate = historyStartDate;
+      if (historyEndDate) params.endDate = historyEndDate;
+      return (await api.get<ApiResponse<PageResult<CampaignRecord>>>('/bulk-campaigns', { params })).data.data;
+    },
     refetchInterval: 5000,
   });
   const detail = useQuery({
@@ -198,6 +211,14 @@ export function BulkCampaignsPage() {
     }
   }
 
+  function clearHistoryFilters(): void {
+    setHistorySearch('');
+    setHistoryStatus('ALL');
+    setHistoryStartDate('');
+    setHistoryEndDate('');
+    setHistoryPage(1);
+  }
+
   if (user?.role !== 'ADMIN') {
     return <section className="panel"><h1>Administrator access required</h1><p>Bulk campaigns are available to administrators only.</p></section>;
   }
@@ -255,13 +276,15 @@ export function BulkCampaignsPage() {
             <span className="form-hint">Images up to 5 MB, MP4 video up to 16 MB, documents up to 20 MB.</span>
           </label>
           <label className="campaign-file-label">
-            Recipient spreadsheet <span className="required-mark">*</span>
-            <span className="form-hint">Use the first column for phone numbers, one contact per row.</span>
-            <div>
+            <span className="campaign-field-title">
+              Recipient spreadsheet
+            </span>
+            <span className="campaign-required-text"><span className="required-mark" aria-hidden="true">*</span> Required</span>
+            <span className="form-hint">Use column A for phone numbers, one contact per row. Keep “Phone Number” as the header.</span>
+            <div className="campaign-sample-downloads">
               <button type="button" className="text-button" onClick={() => void downloadSample('xlsx')}>
                 Download Excel sample
               </button>
-              {' · '}
               <button type="button" className="text-button" onClick={() => void downloadSample('csv')}>
                 Download CSV sample
               </button>
@@ -272,7 +295,7 @@ export function BulkCampaignsPage() {
               required={!recipientFile}
               onChange={(event) => setRecipientFile(event.target.files?.[0])}
             />
-            <span className="form-hint">CSV or XLSX, phone/mobile column or first column, up to 500 unique recipients.</span>
+            <span className="form-hint">CSV or XLSX, up to 500 unique recipients.</span>
           </label>
           {mediaFile && <div className="campaign-file-summary">{mediaFile.name} · {(mediaFile.size / (1024 * 1024)).toFixed(2)} MB <button type="button" onClick={() => setMediaFile(undefined)}>Remove</button></div>}
           {recipientFile && <div className="campaign-file-summary">{recipientFile.name} · {(recipientFile.size / (1024 * 1024)).toFixed(2)} MB <button type="button" onClick={() => setRecipientFile(undefined)}>Remove</button></div>}
@@ -286,6 +309,30 @@ export function BulkCampaignsPage() {
         <section className="panel campaign-history">
           <div className="panel-heading">
             <div><div className="eyebrow">CAMPAIGN HISTORY</div><h2>{campaigns.data?.total ?? 0} campaigns</h2></div>
+          </div>
+          <div className="campaign-history-filters">
+            <label>
+              <span>Search campaigns</span>
+              <input value={historySearch} onChange={(event) => { setHistorySearch(event.target.value); setHistoryPage(1); }} placeholder="Campaign name" />
+            </label>
+            <label>
+              <span>Status</span>
+              <select value={historyStatus} onChange={(event) => { setHistoryStatus(event.target.value); setHistoryPage(1); }}>
+                <option value="ALL">All statuses</option>
+                {['DRAFT', 'READY', 'QUEUED', 'PROCESSING', 'COMPLETED'].map((status) => <option key={status} value={status}>{status}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>Created from</span>
+              <input type="date" value={historyStartDate} max={historyEndDate || undefined} onChange={(event) => { setHistoryStartDate(event.target.value); setHistoryPage(1); }} />
+            </label>
+            <label>
+              <span>Created to</span>
+              <input type="date" value={historyEndDate} min={historyStartDate || undefined} onChange={(event) => { setHistoryEndDate(event.target.value); setHistoryPage(1); }} />
+            </label>
+            {(historySearch || historyStatus !== 'ALL' || historyStartDate || historyEndDate) && (
+              <button type="button" className="text-button campaign-clear-filters" onClick={clearHistoryFilters}>Clear filters</button>
+            )}
           </div>
           {campaigns.isError && <p className="form-error" role="alert">{getErrorMessage(campaigns.error)}</p>}
           {campaigns.isLoading ? <p className="form-hint">Loading campaign history…</p> : (campaigns.data?.items ?? []).length ? (
@@ -306,6 +353,15 @@ export function BulkCampaignsPage() {
               ))}
             </div>
           ) : <p className="campaign-empty">Campaign previews and delivery activity will appear here.</p>}
+          {(campaigns.data?.total ?? 0) > 10 && (
+            <div className="campaign-history-pagination">
+              <span>Page {historyPage} of {Math.ceil((campaigns.data?.total ?? 0) / 10)}</span>
+              <div>
+                <button type="button" className="secondary-button" disabled={historyPage <= 1 || campaigns.isFetching} onClick={() => setHistoryPage((value) => Math.max(1, value - 1))}>Previous</button>
+                <button type="button" className="secondary-button" disabled={historyPage >= Math.ceil((campaigns.data?.total ?? 0) / 10) || campaigns.isFetching} onClick={() => setHistoryPage((value) => value + 1)}>Next</button>
+              </div>
+            </div>
+          )}
         </section>
       </div>
       {selectedCampaign && (

@@ -36,6 +36,14 @@ export function AdminLayout() {
     refetchInterval: 5000,
     refetchOnWindowFocus: true,
   });
+  const unreadLeads = useQuery({
+    queryKey: ['unread-leads-count'],
+    enabled: user?.role === 'ADMIN' || user?.role === 'SALES',
+    queryFn: async () =>
+      (await api.get<ApiResponse<PageResult<NotificationConversation>>>('/leads?unread=true&page=1&limit=1')).data.data.total,
+    refetchInterval: 10000,
+    refetchOnWindowFocus: true,
+  });
   const unread = (conversations.data ?? []).filter((item) => Number(item.unreadCount ?? 0) > 0);
   const unreadTotal = unread.reduce((sum, item) => sum + Number(item.unreadCount ?? 0), 0);
   useEffect(() => {
@@ -74,7 +82,11 @@ export function AdminLayout() {
               >
                 <span className="nav-index">{String(index + 1).padStart(2, '0')}</span>
                 {label}
-                {label === 'Leads' && <span className="nav-dot" />}
+                {label === 'Leads' && Number(unreadLeads.data ?? 0) > 0 && (
+                  <span className="nav-badge" aria-label={`${unreadLeads.data} unread leads`}>
+                    {Number(unreadLeads.data) > 99 ? '99+' : unreadLeads.data}
+                  </span>
+                )}
               </NavLink>
             ))}
         </nav>

@@ -51,6 +51,12 @@ const campaignPageSchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
 });
+const campaignListSchema = campaignPageSchema.extend({
+  search: z.string().trim().max(120).optional(),
+  status: z.enum(['DRAFT', 'READY', 'QUEUED', 'PROCESSING', 'COMPLETED']).optional(),
+  startDate: z.string().date().optional(),
+  endDate: z.string().date().optional(),
+});
 
 const recipientStatusSchema = z.enum(['UNSENT', 'QUEUED', 'SENDING', 'SENT', 'DELIVERED', 'READ', 'FAILED']);
 
@@ -482,10 +488,22 @@ bulkCampaignsRouter.get(
   '/',
   ...adminOnly,
   asyncHandler(async (req, res) => {
-    const { page, limit } = campaignPageSchema.parse(req.query);
+    const { page, limit, search, status, startDate, endDate } = campaignListSchema.parse(req.query);
+    if (startDate && endDate && startDate > endDate) {
+      throw new ApiError(400, 'Start date must be on or before end date', 'INVALID_DATE_RANGE');
+    }
+    const filter: Record<string, unknown> = {};
+    if (status) filter.status = status;
+    if (search) filter.name = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    if (startDate || endDate) {
+      filter.createdAt = {
+        ...(startDate ? { $gte: new Date(`${startDate}T00:00:00.000Z`) } : {}),
+        ...(endDate ? { $lte: new Date(`${endDate}T23:59:59.999Z`) } : {}),
+      };
+    }
     const [items, total] = await Promise.all([
-      BulkCampaign.find().sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
-      BulkCampaign.countDocuments(),
+      BulkCampaign.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+      BulkCampaign.countDocuments(filter),
     ]);
     const grouped = items.length
       ? await BulkCampaignRecipient.aggregate<{ _id: { campaignId: Types.ObjectId; status: string }; count: number }>([
