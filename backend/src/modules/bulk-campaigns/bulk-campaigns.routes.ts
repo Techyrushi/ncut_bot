@@ -320,6 +320,33 @@ function validateMediaContent(buffer: Buffer, extension: string): void {
 export const bulkCampaignsRouter = Router();
 const adminOnly = [authenticate, requireRoles('ADMIN')] as const;
 
+bulkCampaignsRouter.get(
+  '/sample.csv',
+  ...adminOnly,
+  (_req, res) => {
+    res
+      .type('text/csv')
+      .setHeader('Content-Disposition', 'attachment; filename="ncut-whatsapp-contacts-sample.csv"')
+      .send('Phone Number\r\n');
+  },
+);
+
+bulkCampaignsRouter.get(
+  '/sample.xlsx',
+  ...adminOnly,
+  asyncHandler(async (_req, res) => {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('WhatsApp Contacts');
+    sheet.columns = [{ header: 'Phone Number', key: 'phoneNumber', width: 24 }];
+    sheet.getRow(1).font = { bold: true };
+    const bytes = await workbook.xlsx.writeBuffer();
+    res
+      .type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+      .setHeader('Content-Disposition', 'attachment; filename="ncut-whatsapp-contacts-sample.xlsx"')
+      .send(Buffer.from(bytes));
+  }),
+);
+
 bulkCampaignsRouter.post(
   '/media',
   ...adminOnly,

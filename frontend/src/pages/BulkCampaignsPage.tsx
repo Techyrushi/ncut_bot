@@ -182,6 +182,22 @@ export function BulkCampaignsPage() {
     }
   }
 
+  async function downloadSample(format: 'csv' | 'xlsx'): Promise<void> {
+    try {
+      const response = await api.get(`/bulk-campaigns/sample.${format}`, { responseType: 'blob' });
+      const url = URL.createObjectURL(response.data as Blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `ncut-whatsapp-contacts-sample.${format}`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (requestError) {
+      setError(getErrorMessage(requestError));
+    }
+  }
+
   if (user?.role !== 'ADMIN') {
     return <section className="panel"><h1>Administrator access required</h1><p>Bulk campaigns are available to administrators only.</p></section>;
   }
@@ -240,6 +256,16 @@ export function BulkCampaignsPage() {
           </label>
           <label className="campaign-file-label">
             Recipient spreadsheet <span className="required-mark">*</span>
+            <span className="form-hint">Use the first column for phone numbers, one contact per row.</span>
+            <div>
+              <button type="button" className="text-button" onClick={() => void downloadSample('xlsx')}>
+                Download Excel sample
+              </button>
+              {' · '}
+              <button type="button" className="text-button" onClick={() => void downloadSample('csv')}>
+                Download CSV sample
+              </button>
+            </div>
             <input
               type="file"
               accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
