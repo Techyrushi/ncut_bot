@@ -170,9 +170,32 @@ describe('Meta Cloud API service', () => {
         headers: { 'content-type': 'application/json' },
       }),
     );
+    const error = await whatsappService.sendText('15551112222', 'Hello').catch((requestError: unknown) => requestError);
+    expect(error).toMatchObject({ statusCode: 502 });
+    expect(error).toHaveProperty('message', 'Invalid access token · code 190');
+  });
+
+  it('includes Meta error 131026 details for undeliverable bulk recipients', async () => {
+    const customer = await Customer.create({ whatsappId: '15551112222', phoneNumber: '15551112222' });
+    await Conversation.create({ customerId: customer._id, status: 'OPEN', lastInteractionAt: new Date() });
+    jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: {
+            message: 'Message undeliverable',
+            code: 131026,
+            error_data: { details: 'Message Undeliverable.' },
+          },
+        }),
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      ),
+    );
     await expect(whatsappService.sendText('15551112222', 'Hello')).rejects.toMatchObject({
       statusCode: 502,
-      message: 'Invalid access token',
+      code: 'WHATSAPP_API_ERROR',
+      message: expect.stringContaining(
+        'Meta error 131026: Message undeliverable Message Undeliverable.',
+      ),
     });
   });
 

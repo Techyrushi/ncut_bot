@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
 import type { ApiResponse, PageResult } from '../types/api';
 import { useAuth } from '../contexts/AuthContext';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 
 interface RecordPageProps {
   kind: 'customers' | 'conversations' | 'leads';
@@ -17,6 +18,7 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
   const [consentFilter, setConsentFilter] = useState<ConsentFilter>('ALL');
   const [page, setPage] = useState(1);
   const [notice, setNotice] = useState('');
+  const [customerToDelete, setCustomerToDelete] = useState<{ id: string; name: string; phone: string }>();
   const { user } = useAuth();
   const client = useQueryClient();
   const pageSize = 10;
@@ -43,6 +45,21 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : 'Unable to update customer consent.'),
   });
+  const deleteCustomer = useMutation({
+    mutationFn: async ({ id }: { id: string; name: string }) => api.delete(`/customers/${id}`),
+    onSuccess: async (_response, { name }) => {
+      setCustomerToDelete(undefined);
+      setNotice(`${name} and associated history were deleted.`);
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['customers'] }),
+        client.invalidateQueries({ queryKey: ['conversations'] }),
+        client.invalidateQueries({ queryKey: ['leads'] }),
+        client.invalidateQueries({ queryKey: ['dashboard-stats'] }),
+        client.invalidateQueries({ queryKey: ['unread-leads-count'] }),
+      ]);
+    },
+    onError: () => setNotice('Unable to delete this customer and its associated history.'),
+  });
   const columns =
     kind === 'customers'
       ? ['profileName', 'phoneNumber', 'optInStatus', 'updatedAt']
@@ -62,7 +79,7 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
         </div>
       </div>
       {notice && (
-        <div className={`alert ${updateOptIn.isError ? 'error' : ''}`} role="status">
+        <div className={`alert ${updateOptIn.isError || deleteCustomer.isError ? 'error' : ''}`} role="status">
           {notice}
           <button type="button" onClick={() => setNotice('')} aria-label="Dismiss notification">
             ×
@@ -167,22 +184,44 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
                     <td>{formatDate(record.updatedAt)}</td>
                     {kind === 'customers' && (
                       <td className="table-actions">
-                        <button
-                          type="button"
-                          className={`table-action-button ${targetStatus === 'OPTED_OUT' ? 'subtle-danger' : ''}`}
-                          disabled={updateOptIn.isPending}
-                          onClick={() => {
-                            const consentText =
-                              targetStatus === 'OPTED_IN'
-                                ? 'Only continue if this customer explicitly opted in and you have verified the source. Record opt-in?'
-                                : 'Record this customer as opted out?';
-                            if (window.confirm(consentText)) {
-                              updateOptIn.mutate({ id, status: targetStatus });
-                            }
-                          }}
-                        >
-                          {targetStatus === 'OPTED_OUT' ? 'Opt out' : 'Record opt-in'}
-                        </button>
+                        <div className="customer-actions">
+                          <button
+                            type="button"
+                            className={`table-action-button ${targetStatus === 'OPTED_OUT' ? 'subtle-danger' : ''}`}
+                            title={targetStatus === 'OPTED_OUT' ? 'Record that this customer opted out' : 'Record verified customer opt-in'}
+                            disabled={updateOptIn.isPending}
+                            onClick={() => {
+                              const consentText =
+                                targetStatus === 'OPTED_IN'
+                                  ? 'Only continue if this customer explicitly opted in and you have verified the source. Record opt-in?'
+                                  : 'Record this customer as opted out?';
+                              if (window.confirm(consentText)) {
+                                updateOptIn.mutate({ id, status: targetStatus });
+                              }
+                            }}
+                          >
+                            {targetStatus === 'OPTED_OUT' ? 'Opt out' : 'Record opt-in'}
+                          </button>
+                          {user?.role === 'ADMIN' && (
+                            <button
+                              type="button"
+                              className="table-action-button delete-action-button"
+                              title="Permanently delete this customer and all linked history"
+                              aria-label={`Delete ${displayName} and associated history`}
+                              disabled={deleteCustomer.isPending}
+                              onClick={() => {
+                                deleteCustomer.reset();
+                                setCustomerToDelete({
+                                  id,
+                                  name: displayName,
+                                  phone: String(record.phoneNumber ?? record.whatsappId ?? ''),
+                                });
+                              }}
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </div>
                       </td>
                     )}
                   </tr>
@@ -222,6 +261,18 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
           </div>
         </div>
       </section>
+      {customerToDelete && (
+        <ConfirmDialog
+          title="Delete customer and history?"
+          message={`This permanently deletes ${customerToDelete.name}${customerToDelete.phone ? ` (${customerToDelete.phone})` : ''}, along with their conversations, messages, leads, and campaign recipient history. This cannot be undone.`}
+          confirmLabel="Delete customer"
+          pendingLabel="Deleting…"
+          isPending={deleteCustomer.isPending}
+          error={deleteCustomer.error instanceof Error ? deleteCustomer.error.message : undefined}
+          onCancel={() => setCustomerToDelete(undefined)}
+          onConfirm={() => deleteCustomer.mutate({ id: customerToDelete.id, name: customerToDelete.name })}
+        />
+      )}
     </div>
   );
 }

@@ -3,16 +3,45 @@ import { Conversation } from '../../database/models/conversation.model';
 import { Customer } from '../../database/models/customer.model';
 import { ApiError } from '../../utils/api-error';
 
+type WhatsAppApiError = {
+  message?: string;
+  code?: number;
+  error_subcode?: number;
+  type?: string;
+  error_data?: { details?: string };
+};
 type WhatsAppMessageResponse = { messages?: Array<{ id: string }> };
 type WhatsAppPhoneNumberResponse = {
   id?: string;
   status?: string;
   display_phone_number?: string;
   verified_name?: string;
-  error?: { message?: string };
+  error?: WhatsAppApiError;
 };
 type InteractiveButton = { id: string; title: string };
 type InteractiveRow = { id: string; title: string; description?: string };
+
+function metaApiError(error: WhatsAppApiError | undefined): ApiError {
+  if (error?.code === 200 && error.message?.includes('Cannot call API for app')) {
+    return new ApiError(
+      502,
+      `${error.message}. Meta rejected the app/user authorization for the configured WhatsApp token. Generate a system-user access token from the Meta app connected to this WhatsApp Business Account, assign that user the WABA and phone-number assets, enable whatsapp_business_messaging and whatsapp_business_management, then update WHATSAPP_ACCESS_TOKEN and restart the backend.`,
+      'WHATSAPP_APP_AUTHORIZATION_ERROR',
+    );
+  }
+  const details = [
+    error?.type,
+    typeof error?.code === 'number' ? `code ${error.code}` : undefined,
+    typeof error?.error_subcode === 'number' ? `subcode ${error.error_subcode}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(' ');
+  return new ApiError(
+    502,
+    [error?.message ?? 'WhatsApp Cloud API request failed', details].filter(Boolean).join(' · '),
+    'WHATSAPP_API_ERROR',
+  );
+}
 
 export class WhatsAppService {
   private get endpoint(): string {
@@ -34,12 +63,22 @@ export class WhatsAppService {
       body: JSON.stringify({ messaging_product: 'whatsapp', recipient_type: 'individual', to, ...message }),
     });
 
-    const data = (await response.json().catch(() => ({}))) as
-      | WhatsAppMessageResponse
-      | { error?: { message?: string; code?: number } };
+    const data = (await response.json().catch(() => ({}))) as WhatsAppMessageResponse & {
+      error?: WhatsAppApiError;
+    };
     if (!response.ok) {
       const error = 'error' in data ? data.error : undefined;
-      throw new ApiError(502, error?.message ?? 'WhatsApp Cloud API request failed', 'WHATSAPP_API_ERROR');
+      if (error?.code === 131026) {
+        const message = [
+            `Meta error 131026: ${error.message ?? 'Message undeliverable'}`,
+            error.error_data?.details,
+            'Check that the number is correct, registered on WhatsApp, and able to receive messages.',
+          ]
+            .filter(Boolean)
+            .join(' ')
+        throw new ApiError(502, message, 'WHATSAPP_API_ERROR');
+      }
+      throw metaApiError(error);
     }
     const messageId = 'messages' in data ? data.messages?.[0]?.id : undefined;
     if (!messageId) throw new ApiError(502, 'WhatsApp API returned no message identifier', 'WHATSAPP_INVALID_RESPONSE');
@@ -78,11 +117,7 @@ export class WhatsAppService {
     });
     const data = (await response.json().catch(() => ({}))) as WhatsAppPhoneNumberResponse;
     if (!response.ok) {
-      throw new ApiError(
-        502,
-        data.error?.message ?? 'Meta rejected the phone number or access token',
-        'WHATSAPP_API_ERROR',
-      );
+      throw metaApiError(data.error ?? { message: 'Meta rejected the phone number or access token' });
     }
     return {
       id: data.id,

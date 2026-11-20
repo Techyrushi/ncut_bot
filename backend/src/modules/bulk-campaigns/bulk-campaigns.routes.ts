@@ -621,3 +621,36 @@ bulkCampaignsRouter.post(
   }),
 );
 
+bulkCampaignsRouter.delete(
+  '/:id',
+  ...adminOnly,
+  asyncHandler(async (req, res) => {
+    const campaignId = campaignIdOrThrow(req.params.id);
+    const campaign = await BulkCampaign.findById(campaignId);
+    if (!campaign) throw new ApiError(404, 'Campaign not found', 'NOT_FOUND');
+    if (!['DRAFT', 'READY'].includes(campaign.status)) {
+      throw new ApiError(
+        409,
+        'Only unsent draft or previewed campaigns can be deleted; delivery history is retained.',
+        'CAMPAIGN_HISTORY_PROTECTED',
+      );
+    }
+
+    const recipients = await BulkCampaignRecipient.deleteMany({ campaignId });
+    await campaign.deleteOne();
+    await recordActivity({
+      source: 'USER',
+      action: 'BULK_CAMPAIGN_DELETED',
+      summary: `Deleted unsent campaign "${campaign.name}" and ${recipients.deletedCount} recipient preview record(s)`,
+      resourceType: 'bulk-campaign',
+      resourceId: campaign.id,
+      actorId: (req as AuthenticatedRequest).user?.id,
+      actorRole: 'ADMIN',
+    });
+    res.json({
+      success: true,
+      data: { id: campaign.id, deletedRecipients: recipients.deletedCount },
+    });
+  }),
+);
+

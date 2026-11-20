@@ -3073,6 +3073,69 @@ td {
   font-size: 12px;
   line-height: 1.5;
 }
+.confirmation-modal {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  text-align: center;
+}
+.confirmation-icon {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #f3d9b1;
+  border-radius: 50%;
+  background: #fff8eb;
+  color: #b66b14;
+  font-size: 27px;
+  font-weight: 750;
+}
+.confirmation-modal h2 {
+  margin: 0;
+  color: #26334b;
+  font-size: 20px;
+}
+.confirmation-modal > p {
+  margin: 0;
+  color: #69758a;
+  font-size: 14px;
+  line-height: 1.6;
+}
+.confirmation-modal > .form-error {
+  width: 100%;
+  text-align: left;
+}
+.confirmation-modal .modal-actions {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+.confirm-danger-button {
+  min-height: 42px;
+  padding: 0 16px;
+  border: 1px solid #c83d4b;
+  border-radius: 8px;
+  background: #c83d4b;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+}
+.confirm-danger-button:hover:not(:disabled) {
+  border-color: #a92d3a;
+  background: #a92d3a;
+}
+.confirm-danger-button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+.confirm-danger-button:focus-visible,
+.confirmation-modal .secondary-button:focus-visible {
+  outline: 3px solid #c83d4b55;
+  outline-offset: 2px;
+}
 .form-error {
   color: #b42318;
   font-size: 13px;
@@ -3162,21 +3225,66 @@ td {
   display: grid;
   margin-top: 12px;
 }
+.campaign-history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid #edf0f4;
+}
 .campaign-history-item {
   width: 100%;
+  flex: 1 1 auto;
   display: flex;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
   padding: 13px 8px;
   border: 0;
-  border-bottom: 1px solid #edf0f4;
+  border-bottom: 0;
   background: #fff;
   text-align: left;
 }
 .campaign-history-item.selected,
 .campaign-history-item:hover {
   background: #f7f9f2;
+}
+.campaign-delete-button,
+.logs-clear-button {
+  border-color: #edc8cc;
+  background: #fff7f7;
+  color: #ad4350;
+}
+.campaign-delete-button {
+  min-height: 36px;
+  flex: 0 0 auto;
+  padding: 0 10px;
+  border: 1px solid #edc8cc;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.campaign-delete-button:hover:not(:disabled),
+.logs-clear-button:hover:not(:disabled) {
+  border-color: #d98b93;
+  background: #ffeded;
+}
+.campaign-delete-button:focus-visible,
+.logs-clear-button:focus-visible {
+  outline: 3px solid #bb414b55;
+  outline-offset: 2px;
+}
+.campaign-delete-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+.logs-page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+.logs-clear-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 .campaign-history-copy {
   display: grid;
@@ -3466,4 +3574,60 @@ td {
   .lead-history-button {
     white-space: normal;
   }
+}
+.logs-activity-heading {
+  padding-right: 24px;
+  padding-left: 24px;
+}
+@media (max-width: 720px) {
+  .logs-activity-heading {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+}
+.product-action-group,
+.customer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.product-action-button {
+  min-height: 36px;
+  padding: 0 11px;
+  border: 1px solid;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  transition: background-color 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+.product-action-button.edit {
+  border-color: #cbd9a8;
+  background: #f7faef;
+  color: #526d27;
+}
+.product-action-button.edit:hover {
+  border-color: #97b54b;
+  background: #edf5db;
+  box-shadow: 0 2px 7px #26390e14;
+}
+.product-action-button.archive,
+.delete-action-button {
+  border-color: #edc8cc;
+  background: #fff7f7;
+  color: #ad4350;
+}
+.product-action-button.archive:hover,
+.delete-action-button:hover:not(:disabled) {
+  border-color: #d98b93;
+  background: #ffeded;
+  box-shadow: 0 2px 7px #5d111514;
+}
+.product-action-button:focus-visible,
+.delete-action-button:focus-visible {
+  outline: 3px solid #bb414b55;
+  outline-offset: 2px;
+}
+.customer-actions {
+  justify-content: flex-end;
+  min-width: max-content;
 }

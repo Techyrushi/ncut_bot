@@ -1,5 +1,7 @@
 import { hash } from 'bcryptjs';
 import { randomUUID } from 'node:crypto';
+import { rm } from 'node:fs/promises';
+import { basename, resolve } from 'node:path';
 import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
 import request from 'supertest';
@@ -142,6 +144,29 @@ it('tests Meta phone-number connectivity without sending a message', async () =>
     '/123456789?fields=id,status,display_phone_number,verified_name',
   );
   expect(fetchMock.mock.calls[0]?.[1]?.method).toBe('GET');
+
+  fetchMock.mockResolvedValueOnce(
+    new Response(
+      JSON.stringify({
+        error: {
+          message: 'Cannot call API for app 123 on behalf of user 456',
+          code: 200,
+          type: 'OAuthException',
+        },
+      }),
+      { status: 400, headers: { 'content-type': 'application/json' } },
+    ),
+  );
+  const denied = await request(app)
+    .post('/api/v1/whatsapp/configuration/test-connection')
+    .set('authorization', `Bearer ${token}`);
+  expect(denied.status).toBe(502);
+  expect(denied.body.error).toMatchObject({
+    code: 'WHATSAPP_APP_AUTHORIZATION_ERROR',
+    message: expect.stringContaining(
+      'Generate a system-user access token from the Meta app connected to this WhatsApp Business Account',
+    ),
+  });
 });
 
 it('uploads only image data and accepts documented product category names', async () => {
@@ -179,6 +204,45 @@ it('uploads only image data and accepts documented product category names', asyn
     .set('authorization', `Bearer ${token}`);
   expect(categories.status).toBe(200);
   expect(categories.body.data).toContain('Velcro & PSA Backup Pads');
+});
+
+it('uploads campaign media and serves the saved attachment', async () => {
+  const admin = await User.create({
+    email: 'admin@example.com',
+    name: 'Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const token = jwt.sign({ role: admin.role, ver: admin.authVersion ?? 0 }, env.JWT_SECRET, {
+    subject: admin.id,
+    jwtid: randomUUID(),
+    expiresIn: '1h',
+  });
+  const image = Buffer.from('89504e470d0a1a0a', 'hex');
+  let uploadedPath = '';
+  try {
+    const uploaded = await request(app)
+      .post('/api/v1/bulk-campaigns/media')
+      .set('authorization', `Bearer ${token}`)
+      .set('content-type', 'image/png')
+      .set('x-file-name', 'campaign-test.png')
+      .send(image);
+    expect(uploaded.status).toBe(201);
+    expect(uploaded.body.data).toMatchObject({
+      type: 'IMAGE',
+      mimeType: 'image/png',
+      filename: 'campaign-test.png',
+    });
+
+    uploadedPath = new URL(uploaded.body.data.url as string).pathname;
+    const served = await request(app).get(uploadedPath);
+    expect(served.status).toBe(200);
+    expect(served.body).toEqual(image);
+  } finally {
+    if (uploadedPath) {
+      await rm(resolve(process.cwd(), 'uploads', 'campaigns', basename(uploadedPath)), { force: true });
+    }
+  }
 });
 
 it('counts inbound unread messages and marks them read through WhatsApp', async () => {
@@ -648,6 +712,73 @@ it('filters and searches customer records with pagination metadata', async () =>
   expect(invalidFilter.status).toBe(400);
 });
 
+it('allows admins to delete a customer and all linked conversations and campaign history', async () => {
+  const admin = await User.create({
+    email: 'admin@example.com',
+    name: 'Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const token = jwt.sign({ role: admin.role, ver: admin.authVersion ?? 0 }, env.JWT_SECRET, {
+    subject: admin.id,
+    jwtid: randomUUID(),
+    expiresIn: '1h',
+  });
+  const [customer, otherCustomer] = await Customer.create([
+    { whatsappId: '15550004441', phoneNumber: '15550004441', profileName: 'Delete Me' },
+    { whatsappId: '15550004442', phoneNumber: '15550004442', profileName: 'Keep Me' },
+  ]);
+  const conversation = await Conversation.create({ customerId: customer!._id });
+  const campaign = await BulkCampaign.create({
+    name: 'Customer deletion test',
+    createdBy: admin._id,
+    status: 'COMPLETED',
+  });
+  await Promise.all([
+    Message.create({
+      customerId: customer!._id,
+      conversationId: conversation._id,
+      whatsappMessageId: 'wamid.delete-customer-test',
+      direction: 'INBOUND',
+      messageType: 'TEXT',
+      content: { text: 'Test history' },
+      status: 'RECEIVED',
+      timestamp: new Date(),
+    }),
+    Lead.create({
+      customerId: customer!._id,
+      conversationId: conversation._id,
+      status: 'NEW',
+    }),
+    BulkCampaignRecipient.create({
+      campaignId: campaign._id,
+      recipientKey: '15550004441',
+      phoneNumber: '15550004441',
+      customerId: customer!._id,
+      sourceRow: 2,
+      status: 'SENT',
+    }),
+  ]);
+
+  const result = await request(app)
+    .delete(`/api/v1/customers/${customer!._id}`)
+    .set('authorization', `Bearer ${token}`);
+
+  expect(result.status).toBe(200);
+  expect(result.body.data.deleted).toEqual({
+    conversations: 1,
+    messages: 1,
+    leads: 1,
+    campaignRecipients: 1,
+  });
+  expect(await Customer.findById(customer!._id)).toBeNull();
+  expect(await Customer.findById(otherCustomer!._id)).not.toBeNull();
+  expect(await Conversation.countDocuments({ customerId: customer!._id })).toBe(0);
+  expect(await Message.countDocuments({ customerId: customer!._id })).toBe(0);
+  expect(await Lead.countDocuments({ customerId: customer!._id })).toBe(0);
+  expect(await BulkCampaignRecipient.countDocuments({ customerId: customer!._id })).toBe(0);
+});
+
 it('previews bulk recipients with deduplication, consent and service-window safeguards', async () => {
   const admin = await User.create({
     email: 'admin@example.com',
@@ -915,6 +1046,92 @@ it('records authenticated write activity and exposes it only to administrators',
 
   const anonymous = await request(app).get('/api/v1/logs');
   expect(anonymous.status).toBe(401);
+});
+
+it('clears activity history through the admin-only logs endpoint', async () => {
+  const [admin, sales] = await User.create([
+    {
+      email: 'admin@example.com',
+      name: 'Admin',
+      passwordHash: await hash('long-test-password', 4),
+      role: 'ADMIN',
+    },
+    {
+      email: 'sales@example.com',
+      name: 'Sales',
+      passwordHash: await hash('long-test-password', 4),
+      role: 'SALES',
+    },
+  ]);
+  const adminToken = jwt.sign({ role: admin!.role, ver: admin!.authVersion ?? 0 }, env.JWT_SECRET, {
+    subject: admin!.id,
+    jwtid: randomUUID(),
+    expiresIn: '1h',
+  });
+  const salesToken = jwt.sign({ role: sales!.role, ver: sales!.authVersion ?? 0 }, env.JWT_SECRET, {
+    subject: sales!.id,
+    jwtid: randomUUID(),
+    expiresIn: '1h',
+  });
+  await ActivityLog.create([
+    { source: 'SYSTEM', action: 'OLD_SYSTEM_EVENT', occurredAt: new Date(Date.now() - 10_000) },
+    { source: 'USER', action: 'OLD_USER_EVENT', occurredAt: new Date(Date.now() - 5_000) },
+  ]);
+
+  const forbidden = await request(app).delete('/api/v1/logs').set('authorization', `Bearer ${salesToken}`);
+  expect(forbidden.status).toBe(403);
+  const cleared = await request(app).delete('/api/v1/logs').set('authorization', `Bearer ${adminToken}`);
+  expect(cleared.status).toBe(200);
+  expect(cleared.body.data.deletedCount).toBeGreaterThanOrEqual(2);
+  expect(await ActivityLog.countDocuments({ action: { $in: ['OLD_SYSTEM_EVENT', 'OLD_USER_EVENT'] } })).toBe(0);
+});
+
+it('deletes only unsent campaign previews and retains sent campaign history', async () => {
+  const admin = await User.create({
+    email: 'admin@example.com',
+    name: 'Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const token = jwt.sign({ role: admin.role, ver: admin.authVersion ?? 0 }, env.JWT_SECRET, {
+    subject: admin.id,
+    jwtid: randomUUID(),
+    expiresIn: '1h',
+  });
+  const [preview, sent] = await BulkCampaign.create([
+    { name: 'Unsent preview', createdBy: admin._id, status: 'READY' },
+    { name: 'Sent campaign', createdBy: admin._id, status: 'COMPLETED' },
+  ]);
+  const previewRecipient = await BulkCampaignRecipient.create({
+    campaignId: preview!._id,
+    recipientKey: '15550006661',
+    phoneNumber: '15550006661',
+    sourceRow: 2,
+    status: 'UNSENT',
+  });
+  const sentRecipient = await BulkCampaignRecipient.create({
+    campaignId: sent!._id,
+    recipientKey: '15550006662',
+    phoneNumber: '15550006662',
+    sourceRow: 2,
+    status: 'DELIVERED',
+  });
+
+  const deleted = await request(app)
+    .delete(`/api/v1/bulk-campaigns/${preview!._id}`)
+    .set('authorization', `Bearer ${token}`);
+  expect(deleted.status).toBe(200);
+  expect(deleted.body.data.deletedRecipients).toBe(1);
+  expect(await BulkCampaign.findById(preview!._id)).toBeNull();
+  expect(await BulkCampaignRecipient.findById(previewRecipient._id)).toBeNull();
+
+  const protectedHistory = await request(app)
+    .delete(`/api/v1/bulk-campaigns/${sent!._id}`)
+    .set('authorization', `Bearer ${token}`);
+  expect(protectedHistory.status).toBe(409);
+  expect(protectedHistory.body.error.code).toBe('CAMPAIGN_HISTORY_PROTECTED');
+  expect(await BulkCampaign.findById(sent!._id)).not.toBeNull();
+  expect(await BulkCampaignRecipient.findById(sentRecipient._id)).not.toBeNull();
 });
 
 afterAll(async () => {

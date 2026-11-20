@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
 import type { ApiResponse, PageResult, Product } from '../types/api';
 import { useAuth } from '../contexts/AuthContext';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 
 const suggestedCategories = [
   'Flap Disc',
@@ -55,6 +56,7 @@ export function ProductsPage() {
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string>();
   const [notice, setNotice] = useState('');
+  const [productToArchive, setProductToArchive] = useState<Product>();
   const [search, setSearch] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'archived'>('all');
@@ -185,10 +187,10 @@ export function ProductsPage() {
   const remove = useMutation({
     mutationFn: async (id: string) => api.delete(`/products/${id}`),
     onSuccess: async () => {
+      setProductToArchive(undefined);
       await client.invalidateQueries({ queryKey: ['products'] });
       setNotice('Product archived.');
     },
-    onError: (error) => setNotice(error instanceof Error ? error.message : 'Unable to archive product.'),
   });
 
   function submit(event: FormEvent) {
@@ -549,16 +551,29 @@ export function ProductsPage() {
                   </td>
                   <td>
                     {canEdit && (
-                      <>
-                        <button className="text-button" onClick={() => edit(product)}>
+                      <div className="product-action-group">
+                        <button
+                          type="button"
+                          className="product-action-button edit"
+                          title={`Edit ${product.name}`}
+                          onClick={() => edit(product)}
+                        >
                           Edit
                         </button>
                         {product.isActive && (
-                          <button className="text-button danger-text" onClick={() => remove.mutate(product._id)}>
+                          <button
+                            type="button"
+                            className="product-action-button archive"
+                            title={`Archive ${product.name}; it will no longer appear in WhatsApp product selection`}
+                            onClick={() => {
+                              remove.reset();
+                              setProductToArchive(product);
+                            }}
+                          >
                             Archive
                           </button>
                         )}
-                      </>
+                      </div>
                     )}
                   </td>
                 </tr>
@@ -598,6 +613,18 @@ export function ProductsPage() {
             </button>
           </div>
         </div>
+        {productToArchive && (
+          <ConfirmDialog
+            title="Archive this product?"
+            message={`${productToArchive.name} will be hidden from the active catalogue and WhatsApp product selection. Existing lead history will remain.`}
+            confirmLabel="Archive product"
+            pendingLabel="Archiving…"
+            isPending={remove.isPending}
+            error={remove.error instanceof Error ? remove.error.message : undefined}
+            onCancel={() => setProductToArchive(undefined)}
+            onConfirm={() => remove.mutate(productToArchive._id)}
+          />
+        )}
       </div>
     </div>
   );

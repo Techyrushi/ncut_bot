@@ -1,6 +1,11 @@
 import { Router } from 'express';
+import { Types } from 'mongoose';
 import { z } from 'zod';
+import { BulkCampaignRecipient } from '../../database/models/bulk-campaign.model';
 import { Customer } from '../../database/models/customer.model';
+import { Conversation } from '../../database/models/conversation.model';
+import { Lead } from '../../database/models/lead.model';
+import { Message } from '../../database/models/message.model';
 import { authenticate, requireRoles } from '../../middleware/auth';
 import { asyncHandler } from '../../utils/async-handler';
 import { ApiError } from '../../utils/api-error';
@@ -66,6 +71,41 @@ customersRouter.patch(
     );
     if (!customer) throw new ApiError(404, 'Customer not found', 'NOT_FOUND');
     res.json({ success: true, data: customer });
+  }),
+);
+
+customersRouter.delete(
+  '/:id',
+  authenticate,
+  requireRoles('ADMIN'),
+  asyncHandler(async (req, res) => {
+    const customerId = req.params.id;
+    if (typeof customerId !== 'string' || !Types.ObjectId.isValid(customerId)) {
+      throw new ApiError(404, 'Customer not found', 'NOT_FOUND');
+    }
+    const customer = await Customer.findById(customerId);
+    if (!customer) throw new ApiError(404, 'Customer not found', 'NOT_FOUND');
+
+    const [conversations, messages, leads, campaignRecipients] = await Promise.all([
+      Conversation.deleteMany({ customerId: customer._id }),
+      Message.deleteMany({ customerId: customer._id }),
+      Lead.deleteMany({ customerId: customer._id }),
+      BulkCampaignRecipient.deleteMany({ customerId: customer._id }),
+    ]);
+    await customer.deleteOne();
+
+    res.json({
+      success: true,
+      data: {
+        id: customer.id,
+        deleted: {
+          conversations: conversations.deletedCount,
+          messages: messages.deletedCount,
+          leads: leads.deletedCount,
+          campaignRecipients: campaignRecipients.deletedCount,
+        },
+      },
+    });
   }),
 );
 

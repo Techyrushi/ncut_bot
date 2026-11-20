@@ -6,6 +6,16 @@ import { asyncHandler } from '../../utils/async-handler';
 
 export const logsRouter = Router();
 
+logsRouter.delete(
+  '/',
+  authenticate,
+  requireRoles('ADMIN'),
+  asyncHandler(async (_req, res) => {
+    const result = await ActivityLog.deleteMany({});
+    res.json({ success: true, data: { deletedCount: result.deletedCount } });
+  }),
+);
+
 logsRouter.get(
   '/',
   authenticate,

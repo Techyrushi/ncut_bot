@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
 import type { ApiResponse, PageResult } from '../types/api';
+import { ConfirmDialog } from '../components/ConfirmDialog';
 
 type ActivityLogEntry = {
   _id: string;
@@ -23,6 +24,9 @@ export function SystemLogsPage() {
   const [search, setSearch] = useState('');
   const [source, setSource] = useState<SourceFilter>('ALL');
   const [page, setPage] = useState(1);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const [notice, setNotice] = useState('');
+  const client = useQueryClient();
   const logs = useQuery({
     queryKey: ['activity-logs', page, search, source],
     queryFn: async () => {
@@ -37,7 +41,17 @@ export function SystemLogsPage() {
     queryFn: async () => (await api.get<ApiResponse<HealthStatus>>('/health')).data.data,
     refetchInterval: 30_000,
   });
+  const clearHistory = useMutation({
+    mutationFn: async () => (await api.delete<ApiResponse<{ deletedCount: number }>>('/logs')).data.data,
+    onSuccess: async ({ deletedCount }) => {
+      setConfirmClear(false);
+      setNotice(`Cleared ${deletedCount} activity record${deletedCount === 1 ? '' : 's'}. This action is recorded in the audit trail.`);
+      setPage(1);
+      await client.invalidateQueries({ queryKey: ['activity-logs'] });
+    },
+  });
   const totalPages = Math.max(1, Math.ceil((logs.data?.total ?? 0) / (logs.data?.limit ?? 25)));
+  const clearError = clearHistory.error instanceof Error ? clearHistory.error.message : '';
 
   return (
     <div className="page-stack">
@@ -47,10 +61,25 @@ export function SystemLogsPage() {
           <h1>System logs</h1>
           <p>Review recorded admin activity and service events. Sensitive request contents are never stored here.</p>
         </div>
-        <button className="secondary-button" type="button" onClick={() => void logs.refetch()}>
-          Refresh activity
-        </button>
+        <div className="logs-page-actions">
+          <button className="secondary-button" type="button" onClick={() => void logs.refetch()}>
+            Refresh activity
+          </button>
+          <button
+            className="secondary-button logs-clear-button"
+            type="button"
+            disabled={!logs.data?.total || clearHistory.isPending}
+            title="Permanently remove all activity log records"
+            onClick={() => {
+              clearHistory.reset();
+              setConfirmClear(true);
+            }}
+          >
+            Clear history
+          </button>
+        </div>
       </div>
+      {notice && <div className="alert" role="status">{notice}<button type="button" onClick={() => setNotice('')}>×</button></div>}
 
       <section className="logs-status-row">
         <div className="logs-status-card">
@@ -76,7 +105,7 @@ export function SystemLogsPage() {
       </section>
 
       <section className="panel table-panel">
-        <div className="customer-table-heading">
+        <div className="customer-table-heading logs-activity-heading">
           <div>
             <div className="eyebrow">AUDIT TRAIL</div>
             <h2>Recent activity</h2>
@@ -208,6 +237,18 @@ export function SystemLogsPage() {
           </div>
         </div>
       </section>
+      {confirmClear && (
+        <ConfirmDialog
+          title="Clear all activity history?"
+          message={`This permanently deletes all ${logs.data?.total ?? 0} activity records from the database, including records outside the current filters. The clear action itself will be retained in the audit trail. Campaign delivery history is not affected.`}
+          confirmLabel="Clear all history"
+          pendingLabel="Clearing…"
+          isPending={clearHistory.isPending}
+          error={clearError || undefined}
+          onCancel={() => setConfirmClear(false)}
+          onConfirm={() => clearHistory.mutate()}
+        />
+      )}
     </div>
   );
 }
