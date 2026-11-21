@@ -632,6 +632,8 @@ it('returns one lead per mobile number with chat history and unread activity', a
       customerId: aliasCustomer!._id,
       conversationId: aliasConversation!._id,
       status: 'NEW',
+      feedback: 'HAPPY',
+      feedbackAt: new Date(),
       visitHistory: [
         {
           whatsappMessageId: 'visit-first',
@@ -655,6 +657,7 @@ it('returns one lead per mobile number with chat history and unread activity', a
     isUnreadLead: true,
     chatHistoryCount: 2,
     requirement: 'Customer asked to connect with the sales team',
+    feedback: 'HAPPY',
     latestConversationId: aliasConversation!.id,
     leadHistory: expect.arrayContaining([
       expect.objectContaining({ conversationId: olderConversation!.id }),
@@ -682,6 +685,7 @@ it('returns one lead per mobile number with chat history and unread activity', a
   const exported = await request(app).get('/api/v1/leads/export.csv').set('authorization', `Bearer ${token}`);
   expect(exported.status).toBe(200);
   expect(exported.text.match(/Customer Alias/g)).toHaveLength(1);
+  expect(exported.text).toContain('HAPPY');
 });
 
 it('filters and searches customer records with pagination metadata', async () => {

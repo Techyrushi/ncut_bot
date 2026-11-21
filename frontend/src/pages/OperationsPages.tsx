@@ -441,7 +441,7 @@ export function LeadsPage() {
                 setSearch(event.target.value);
                 setPage(1);
               }}
-              placeholder="Search customer, number, product, requirement, or lead ID…"
+              placeholder="Search customer, number, product, requirement, feedback, or lead ID…"
               aria-label="Search leads"
             />
           </label>
@@ -521,6 +521,7 @@ export function LeadsPage() {
                 <th>INTERESTED PRODUCTS</th>
                 <th>ASSIGNEE</th>
                 <th>STATUS</th>
+                <th>FEEDBACK</th>
                 <th>LEAD RECEIPT</th>
                 <th>CREATED</th>
                 <th>ACTIONS</th>
@@ -580,6 +581,11 @@ export function LeadsPage() {
                     </select>
                   </td>
                   <td>
+                    <span className="lead-feedback-cell">
+                      {lead.feedback === 'HAPPY' ? 'Happy 😄' : lead.feedback === 'NEUTRAL' ? 'Neutral 😐' : lead.feedback === 'UNHAPPY' ? 'Unhappy 😞' : 'Not provided'}
+                    </span>
+                  </td>
+                  <td>
                     <span className={`status-chip ${lead.notificationStatus === 'SENT' ? 'on' : 'off'}`}>
                       {String(lead.notificationStatus ?? 'PENDING')}
                     </span>
@@ -606,7 +612,7 @@ export function LeadsPage() {
               ))}
               {leads.data?.items.length === 0 && (
                 <tr>
-                  <td colSpan={8} className="empty-row">
+                  <td colSpan={9} className="empty-row">
                     {filtersActive ? 'No leads match these filters. Try broadening your search.' : 'No leads yet.'}
                   </td>
                 </tr>

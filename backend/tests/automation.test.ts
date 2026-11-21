@@ -760,6 +760,40 @@ describe('catalogue automation', () => {
     expect(await Lead.countDocuments({ conversationId: conversation?._id })).toBe(1);
   });
 
+  it('offers post-handover options and records lead feedback', async () => {
+    fakeMetaSend();
+    await automationService.processIncoming({
+      id: 'msg-feedback-handover',
+      from: '15550003337',
+      timestamp: String(Math.floor(Date.now() / 1000)),
+      type: 'interactive',
+      interactive: { button_reply: { id: 'connect_sales', title: 'Connect With Our Team' } },
+    });
+
+    await automationService.processIncoming({
+      id: 'msg-end-chat',
+      from: '15550003337',
+      timestamp: String(Math.floor(Date.now() / 1000)),
+      type: 'interactive',
+      interactive: { button_reply: { id: 'end_chat', title: 'End Chat' } },
+    });
+
+    await automationService.processIncoming({
+      id: 'msg-feedback-happy',
+      from: '15550003337',
+      timestamp: String(Math.floor(Date.now() / 1000)),
+      type: 'interactive',
+      interactive: { button_reply: { id: 'feedback_happy', title: 'Happy' } },
+    });
+
+    const conversation = await Conversation.findOne();
+    expect(conversation?.status).toBe('CLOSED');
+    expect(conversation?.currentStep).toBe('CLOSED');
+    const lead = await Lead.findOne();
+    expect(lead?.feedback).toBe('HAPPY');
+    expect(lead?.feedbackAt).toBeInstanceOf(Date);
+  });
+
   it('does not continue pending automated messages after sales handover', async () => {
     let counter = 0;
     const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => {
@@ -786,7 +820,7 @@ describe('catalogue automation', () => {
 
     await markDelivered(welcomeImage!.whatsappMessageId!);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(await Message.countDocuments({ direction: 'OUTBOUND', messageType: 'INTERACTIVE' })).toBe(0);
+    expect(await Message.countDocuments({ direction: 'OUTBOUND', messageType: 'INTERACTIVE' })).toBe(1);
   });
 
   it('reuses one customer lead when a returning customer hands over a later conversation', async () => {

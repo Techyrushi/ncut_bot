@@ -160,6 +160,53 @@ export class AutomationService {
       await conversation.save();
       if (customer.optInStatus === 'OPTED_OUT') return;
 
+      const handoverSelection = this.selection(message);
+      if (handoverSelection?.id === 'go_home') {
+        await Conversation.updateOne(
+          { _id: conversation._id, status: 'HUMAN_HANDOVER' },
+          {
+            $set: { status: 'OPEN', currentStep: 'NEW', selectedProductIds: [], uniqueProductCount: 0 },
+            $unset: {
+              interestTriggeredAt: 1,
+              interestPromptStatus: 1,
+              interestPromptLockedAt: 1,
+              currentCategory: 1,
+              handoverAt: 1,
+            },
+          },
+        );
+        await this.sendWelcome(customer._id, conversation._id, recipient);
+        return;
+      }
+      if (handoverSelection?.id === 'end_chat') {
+        await Conversation.updateOne(
+          { _id: conversation._id, status: 'HUMAN_HANDOVER' },
+          { $set: { currentStep: 'FEEDBACK' } },
+        );
+        await this.sendFeedbackPrompt(customer._id, conversation._id, recipient);
+        return;
+      }
+      if (
+        conversation.currentStep === 'FEEDBACK' &&
+        handoverSelection &&
+        ['feedback_happy', 'feedback_neutral', 'feedback_unhappy'].includes(handoverSelection.id)
+      ) {
+        const feedback = handoverSelection.id === 'feedback_happy'
+          ? 'HAPPY'
+          : handoverSelection.id === 'feedback_neutral'
+            ? 'NEUTRAL'
+            : 'UNHAPPY';
+        await this.recordLeadFeedback(customer, feedback);
+        await this.sendTracked(customer._id, conversation._id, 'TEXT', { text: 'Thank you for your feedback!' }, () =>
+          whatsappService.sendText(recipient, 'Thank you for your feedback!'),
+        );
+        await Conversation.updateOne(
+          { _id: conversation._id },
+          { $set: { status: 'CLOSED', currentStep: 'CLOSED' } },
+        );
+        return;
+      }
+
       await Conversation.updateOne(
         { _id: conversation._id, status: 'HUMAN_HANDOVER' },
         {
@@ -327,6 +374,48 @@ export class AutomationService {
     }
     if (id === 'connect_sales') {
       await this.handover(customerId, conversation._id, to, inboundMessageId, occurredAt);
+      return;
+    }
+    if (id === 'go_home') {
+      await Conversation.updateOne(
+        { _id: conversation._id },
+        {
+          $set: { status: 'OPEN', currentStep: 'NEW', selectedProductIds: [], uniqueProductCount: 0 },
+          $unset: {
+            interestTriggeredAt: 1,
+            interestPromptStatus: 1,
+            interestPromptLockedAt: 1,
+            currentCategory: 1,
+            handoverAt: 1,
+          },
+        },
+      );
+      await this.sendWelcome(customerId, conversation._id, to);
+      return;
+    }
+    if (id === 'end_chat') {
+      await Conversation.updateOne(
+        { _id: conversation._id },
+        { $set: { status: 'HUMAN_HANDOVER', currentStep: 'FEEDBACK' } },
+      );
+      await this.sendFeedbackPrompt(customerId, conversation._id, to);
+      return;
+    }
+    if (['feedback_happy', 'feedback_neutral', 'feedback_unhappy'].includes(id)) {
+      const feedback = id === 'feedback_happy'
+        ? 'HAPPY'
+        : id === 'feedback_neutral'
+          ? 'NEUTRAL'
+          : 'UNHAPPY';
+      const customer = await Customer.findById(customerId).select('phoneNumber whatsappId');
+      if (customer) await this.recordLeadFeedback(customer, feedback);
+      await this.sendTracked(customerId, conversation._id, 'TEXT', { text: 'Thank you for your feedback!' }, () =>
+        whatsappService.sendText(to, 'Thank you for your feedback!'),
+      );
+      await Conversation.updateOne(
+        { _id: conversation._id },
+        { $set: { status: 'CLOSED', currentStep: 'CLOSED' } },
+      );
       return;
     }
     if (id.startsWith('category:')) {
@@ -872,9 +961,51 @@ export class AutomationService {
       }
       await Lead.updateOne({ _id: lead._id }, { $set: { notificationStatus: 'SENT', notificationSentAt: new Date() } });
     }
-    await this.sendTracked(customerId, conversationId, 'TEXT', { text: 'Sales handover confirmed.' }, () =>
-      whatsappService.sendText(to, 'Thank you. A member of our sales team will be in touch with you.'),
+    const body = 'Thank you. A member of our sales team will be in touch with you.\n\nIs there anything else you\'d like me to help you with?';
+    await this.sendTracked(customerId, conversationId, 'INTERACTIVE', {
+      text: body,
+      buttons: [{ id: 'go_home', title: 'Go Home' }, { id: 'end_chat', title: 'End Chat' }],
+    }, () =>
+      whatsappService.sendButtons(to, body, [
+        { id: 'go_home', title: 'Go Home' },
+        { id: 'end_chat', title: 'End Chat' },
+      ]),
     );
+  }
+
+  private async sendFeedbackPrompt(customerId: Types.ObjectId, conversationId: Types.ObjectId, to: string): Promise<void> {
+    const body = 'Tell me how it felt. Just tap a rating below';
+    await this.sendTracked(customerId, conversationId, 'INTERACTIVE', {
+      text: body,
+      buttons: [
+        { id: 'feedback_happy', title: 'Happy 😄' },
+        { id: 'feedback_neutral', title: 'Neutral 😐' },
+        { id: 'feedback_unhappy', title: 'Unhappy 😞' },
+      ],
+    }, () =>
+      whatsappService.sendButtons(to, body, [
+        { id: 'feedback_happy', title: 'Happy 😄' },
+        { id: 'feedback_neutral', title: 'Neutral 😐' },
+        { id: 'feedback_unhappy', title: 'Unhappy 😞' },
+      ]),
+    );
+  }
+
+  private async recordLeadFeedback(
+    customer: { _id: Types.ObjectId; phoneNumber?: string | null; whatsappId: string },
+    feedback: 'HAPPY' | 'NEUTRAL' | 'UNHAPPY',
+  ): Promise<void> {
+    const phoneIdentity = normalizePhoneIdentity(customer.phoneNumber || customer.whatsappId);
+    const customerIds = phoneIdentity
+      ? await Customer.find({ phoneIdentity }).distinct('_id')
+      : [customer._id];
+    const lead = await Lead.findOne({ customerId: { $in: customerIds } }).sort({ updatedAt: -1 });
+    if (lead) {
+      await Lead.updateOne(
+        { _id: lead._id },
+        { $set: { feedback, feedbackAt: new Date() } },
+      );
+    }
   }
 
   private async sendTracked(

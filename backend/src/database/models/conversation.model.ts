@@ -7,6 +7,7 @@ export const conversationStates = [
   'PRODUCT_DETAILS',
   'INTEREST_TRIGGERED',
   'HUMAN_HANDOVER',
+  'FEEDBACK',
   'CLOSED',
 ] as const;
 

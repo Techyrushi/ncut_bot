@@ -71,6 +71,7 @@ async function buildLeadFilter(query: Record<string, unknown>): Promise<Record<s
         { customerId: { $in: customers } },
         { selectedProducts: { $in: products } },
         { requirement: regex },
+        { feedback: regex },
         ...(filters.search.match(/^[a-f\d]{24}$/i) ? [{ _id: new Types.ObjectId(filters.search) }] : []),
       ],
     });
@@ -108,6 +109,7 @@ function leadCsvRow(lead: Record<string, unknown>): string[] {
       : SALES_FOLLOW_UP_REQUIREMENT,
     String(assignee.name ?? ''),
     String(lead.status ?? ''),
+    typeof lead.feedback === 'string' && lead.feedback.trim() ? lead.feedback.trim() : 'Not provided',
     String(lead.notificationStatus ?? 'PENDING'),
     lead.createdAt instanceof Date ? lead.createdAt.toISOString() : String(lead.createdAt ?? ''),
     lead.updatedAt instanceof Date ? lead.updatedAt.toISOString() : String(lead.updatedAt ?? ''),
@@ -262,6 +264,7 @@ leadsRouter.get(
       'Requirement',
       'Assignee',
       'Status',
+      'Feedback',
       'Notification status',
       'Created at',
       'Updated at',

@@ -32,6 +32,8 @@ const leadSchema = new Schema(
     notificationSentAt: { type: Date },
     adminReadAt: { type: Date },
     requirement: { type: String, trim: true, maxlength: 5000 },
+    feedback: { type: String, enum: ['HAPPY', 'NEUTRAL', 'UNHAPPY'] },
+    feedbackAt: { type: Date },
   },
   { timestamps: true },
 );
