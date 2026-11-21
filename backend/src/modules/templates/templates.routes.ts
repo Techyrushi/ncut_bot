@@ -12,10 +12,12 @@ const templateInput = z.object({
     .toLowerCase()
     .regex(/^[a-z0-9_]+$/)
     .max(512),
+  metaTemplateId: z.string().trim().regex(/^\d{8,30}$/).optional(),
   languageCode: z.string().trim().min(2).max(20),
   category: z.enum(['MARKETING', 'UTILITY', 'AUTHENTICATION']),
   metaStatus: z.enum(['PENDING', 'APPROVED', 'REJECTED', 'PAUSED']).default('PENDING'),
   components: z.array(z.record(z.string(), z.unknown())).default([]),
+  defaultSendComponents: z.array(z.record(z.string(), z.unknown())).default([]),
 });
 
 export const templatesRouter = Router();

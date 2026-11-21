@@ -3691,6 +3691,23 @@ td {
   accent-color: #6d8d35;
   cursor: pointer;
 }
+.consent-import-confirmation {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.consent-import-confirmation input[type='checkbox'] {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  margin: 2px 0 0;
+  padding: 0;
+  accent-color: #6d8d35;
+  cursor: pointer;
+}
 .customer-bulk-toolbar,
 .campaign-detail-actions {
   display: flex;

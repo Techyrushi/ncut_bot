@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../services/api';
 import type { ApiResponse, PageResult } from '../types/api';
@@ -22,6 +22,9 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
   const [customerToDelete, setCustomerToDelete] = useState<{ id: string; name: string; phone: string }>();
   const [selectedCustomerIds, setSelectedCustomerIds] = useState<string[]>([]);
   const [bulkOptInStatus, setBulkOptInStatus] = useState<'OPTED_IN' | 'OPTED_OUT'>();
+  const [consentImportFile, setConsentImportFile] = useState<File>();
+  const [consentImportConfirmed, setConsentImportConfirmed] = useState(false);
+  const [consentImportBusy, setConsentImportBusy] = useState(false);
   const { user } = useAuth();
   const client = useQueryClient();
   const pageSize = 10;
@@ -91,6 +94,58 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
     },
     onError: () => setNotice('Unable to delete this customer and its associated history.'),
   });
+
+  async function importConsentedCustomers(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (!consentImportFile || !consentImportConfirmed) return;
+    const form = event.currentTarget;
+    setConsentImportBusy(true);
+    setNotice('');
+    try {
+      const contentType = consentImportFile.name.toLowerCase().endsWith('.csv')
+        ? 'text/csv'
+        : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+      const response = await api.post<
+        ApiResponse<{
+          created: number;
+          updated: number;
+          skippedOptedOut: number;
+          duplicateRows: number;
+        }>
+      >('/customers/import', consentImportFile, {
+        headers: { 'Content-Type': contentType, 'X-Consent-Verified': 'true' },
+      });
+      const { created, updated, skippedOptedOut, duplicateRows } = response.data.data;
+      setNotice(
+        `Consent import complete: ${created} new, ${updated} updated, ${skippedOptedOut} opted-out contacts preserved, ${duplicateRows} duplicates skipped.`,
+      );
+      setConsentImportFile(undefined);
+      setConsentImportConfirmed(false);
+      form.reset();
+      await client.invalidateQueries({ queryKey: ['customers'] });
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Unable to import consent records.');
+    } finally {
+      setConsentImportBusy(false);
+    }
+  }
+
+  async function downloadConsentSample(): Promise<void> {
+    try {
+      const response = await api.get('/customers/import-sample.xlsx', { responseType: 'blob' });
+      const url = URL.createObjectURL(response.data as Blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'ncut-consented-contacts-sample.xlsx';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Unable to download the Excel sample.');
+    }
+  }
+
   const columns =
     kind === 'customers'
       ? ['selection', 'profileName', 'phoneNumber', 'optInStatus', 'updatedAt']
@@ -144,6 +199,45 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
             ×
           </button>
         </div>
+      )}
+      {kind === 'customers' && (
+        <form className="panel" onSubmit={(event) => void importConsentedCustomers(event)}>
+          <div className="eyebrow">CUSTOMER CONSENT IMPORT</div>
+          <h2>Import opted-in contacts</h2>
+          <p>
+            Upload a CSV/XLSX with Phone Number, Consent Status, Consent Date, and Consent Source columns.
+            Each row must state OPTED_IN and include the actual consent date and source. Existing opt-outs
+            are preserved and excluded.
+          </p>
+          <button type="button" className="text-button" onClick={() => void downloadConsentSample()}>
+            Download Excel sample
+          </button>
+          <label className="campaign-file-label">
+            Consent spreadsheet
+            <input
+              type="file"
+              accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              required
+              onChange={(event) => setConsentImportFile(event.target.files?.[0])}
+            />
+            <span className="form-hint">Up to 500 contacts and 5 MB.</span>
+          </label>
+          <label className="consent-import-confirmation">
+            <input
+              type="checkbox"
+              checked={consentImportConfirmed}
+              onChange={(event) => setConsentImportConfirmed(event.target.checked)}
+            />{' '}
+            <span>I verified that every listed person explicitly consented to receive WhatsApp messages.</span>
+          </label>
+          <button
+            type="submit"
+            className="primary-button"
+            disabled={consentImportBusy || !consentImportFile || !consentImportConfirmed}
+          >
+            {consentImportBusy ? 'Importing consent…' : 'Import contacts and consent'}
+          </button>
+        </form>
       )}
       <section className="panel table-panel customer-table-panel">
         <div className="panel-heading customer-table-heading">

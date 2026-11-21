@@ -117,17 +117,20 @@ export function TeamPage() {
 export function TemplatesPage() {
   const client = useQueryClient();
   const { user } = useAuth();
-  const [form, setForm] = useState({ name: '', languageCode: 'en_US', category: 'UTILITY' });
+  const [form, setForm] = useState({ name: '', metaTemplateId: '', languageCode: 'en_US', category: 'UTILITY' });
+  const [defaultSendComponents, setDefaultSendComponents] = useState('[]');
   const [notice, setNotice] = useState('');
   const templates = useQuery({
     queryKey: ['templates'],
     queryFn: async () => (await api.get<ApiResponse<Array<BasicRecord>>>('/templates')).data.data,
   });
   const create = useMutation({
-    mutationFn: async () => api.post('/templates', { ...form, components: [] }),
+    mutationFn: async (components: Array<Record<string, unknown>>) =>
+      api.post('/templates', { ...form, components: [], defaultSendComponents: components }),
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: ['templates'] });
-      setForm({ name: '', languageCode: 'en_US', category: 'UTILITY' });
+      setForm({ name: '', metaTemplateId: '', languageCode: 'en_US', category: 'UTILITY' });
+      setDefaultSendComponents('[]');
       setNotice('Template record added. Confirm its status in WhatsApp Manager before sending.');
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : 'Unable to save template.'),
@@ -142,7 +145,15 @@ export function TemplatesPage() {
   });
   function submit(event: FormEvent) {
     event.preventDefault();
-    create.mutate();
+    try {
+      const components: unknown = JSON.parse(defaultSendComponents);
+      if (!Array.isArray(components) || components.some((component) => !component || typeof component !== 'object' || Array.isArray(component))) {
+        throw new Error('Default send components must be a JSON array of component objects.');
+      }
+      create.mutate(components as Array<Record<string, unknown>>);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'Default send components must be valid JSON.');
+    }
   }
   return (
     <div className="page-stack">
@@ -173,6 +184,16 @@ export function TemplatesPage() {
               />
             </label>
             <label>
+              Meta template ID
+              <input
+                required
+                inputMode="numeric"
+                pattern="[0-9]{8,30}"
+                value={form.metaTemplateId}
+                onChange={(e) => setForm({ ...form, metaTemplateId: e.target.value })}
+              />
+            </label>
+            <label>
               Language code
               <input
                 required
@@ -189,6 +210,11 @@ export function TemplatesPage() {
               </select>
             </label>
           </div>
+          <label>
+            Default send components JSON
+            <textarea rows={4} value={defaultSendComponents} onChange={(e) => setDefaultSendComponents(e.target.value)} />
+            <span className="form-hint">For image-header templates, include a public image URL parameter. Campaign-specific JSON can override these defaults.</span>
+          </label>
           <button className="primary-button" disabled={create.isPending}>
             Add template <span>→</span>
           </button>
@@ -206,6 +232,7 @@ export function TemplatesPage() {
             <thead>
               <tr>
                 <th>NAME</th>
+                <th>META TEMPLATE ID</th>
                 <th>LANGUAGE</th>
                 <th>CATEGORY</th>
                 <th>META STATUS</th>
@@ -218,6 +245,7 @@ export function TemplatesPage() {
                   <td>
                     <strong>{String(template.name)}</strong>
                   </td>
+                  <td>{String(template.metaTemplateId ?? '—')}</td>
                   <td>{String(template.languageCode)}</td>
                   <td>{String(template.category)}</td>
                   <td>
@@ -244,7 +272,7 @@ export function TemplatesPage() {
               ))}
               {templates.data?.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="empty-row">
+                  <td colSpan={6} className="empty-row">
                     No template records registered.
                   </td>
                 </tr>
@@ -253,7 +281,7 @@ export function TemplatesPage() {
           </table>
         </div>
         <p className="small muted pad-inline">
-          Only mark templates approved after verifying the exact name and language in WhatsApp Manager.
+          Register the exact name, language, and Meta ID from WhatsApp Manager. Only mark a template approved after Meta approves it.
         </p>
       </section>
     </div>

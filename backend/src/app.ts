@@ -27,6 +27,7 @@ import { resolve } from 'node:path';
 export const app = express();
 
 app.disable('x-powered-by');
+app.set('trust proxy', 'loopback');
 app.use(helmet());
 app.use(
   cors({
@@ -52,7 +53,16 @@ app.use(
   whatsappWebhookRouter,
 );
 app.use(express.json({ limit: '1mb' }));
-app.use('/api/', rateLimit({ windowMs: 15 * 60 * 1000, limit: 300, standardHeaders: 'draft-7', legacyHeaders: false }));
+app.use(
+  '/api/',
+  rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 1000,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    skip: () => env.NODE_ENV === 'test',
+  }),
+);
 
 app.use('/api/v1/auth', authRouter);
 app.use('/api/v1/team', teamRouter);

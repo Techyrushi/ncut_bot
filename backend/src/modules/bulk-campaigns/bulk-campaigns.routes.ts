@@ -10,6 +10,7 @@ import { env } from '../../config/env';
 import { BulkCampaign, BulkCampaignRecipient } from '../../database/models/bulk-campaign.model';
 import { Conversation } from '../../database/models/conversation.model';
 import { Customer } from '../../database/models/customer.model';
+import { MessageTemplate } from '../../database/models/message-template.model';
 import { authenticate, requireRoles, type AuthenticatedRequest } from '../../middleware/auth';
 import { finalizeCancelledCampaigns } from './bulk-campaign.service';
 import { recordActivity } from '../logs/activity-log';
@@ -20,6 +21,7 @@ const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
 const MAX_RECIPIENTS = 500;
 const MAX_IMPORT_ROWS = 5000;
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
+const MAX_RECIPIENT_ATTEMPTS = 2;
 const mediaTypes: Record<string, { type: 'IMAGE' | 'VIDEO' | 'DOCUMENT'; mimeType: string }> = {
   '.jpg': { type: 'IMAGE', mimeType: 'image/jpeg' },
   '.jpeg': { type: 'IMAGE', mimeType: 'image/jpeg' },
@@ -38,6 +40,8 @@ const mediaTypes: Record<string, { type: 'IMAGE' | 'VIDEO' | 'DOCUMENT'; mimeTyp
 const campaignInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
   message: z.string().trim().max(4096).default(''),
+  messageTemplateId: z.string().regex(/^[a-f\d]{24}$/i).optional(),
+  templateComponents: z.array(z.record(z.string(), z.unknown())).default([]),
   attachment: z
     .object({
       type: z.enum(['IMAGE', 'VIDEO', 'DOCUMENT']),
@@ -80,6 +84,17 @@ function normalizePhone(raw: string): string | undefined {
   else if (digits.length === 11 && digits.startsWith('0')) digits = `91${digits.slice(1)}`;
   if (digits.length < 11 || digits.length > 15 || digits.startsWith('0')) return undefined;
   return digits;
+}
+
+function phoneCandidates(number: string): string[] {
+  const candidates = new Set([number, `+${number}`]);
+  if (number.startsWith('91')) {
+    const localNumber = number.slice(2);
+    candidates.add(localNumber);
+    candidates.add(`+${localNumber}`);
+    candidates.add(`0${localNumber}`);
+  }
+  return [...candidates];
 }
 
 function spreadsheetCellText(cell: ExcelJS.Cell): string {
@@ -148,7 +163,7 @@ async function parseImport(buffer: Buffer, contentType: string | undefined): Pro
   return rows;
 }
 
-async function assessRecipients(campaignId: Types.ObjectId, rows: ParsedRow[]): Promise<{
+async function assessRecipients(campaignId: Types.ObjectId, rows: ParsedRow[], hasApprovedTemplate = false): Promise<{
   recipients: RecipientInput[];
   duplicates: number;
   eligible: number;
@@ -172,22 +187,12 @@ async function assessRecipients(campaignId: Types.ObjectId, rows: ParsedRow[]): 
     throw new ApiError(413, `A campaign may include at most ${MAX_RECIPIENTS} unique recipients`, 'TOO_MANY_RECIPIENTS');
   }
 
-  const phoneCandidates = new Set<string>();
-  for (const number of uniqueNumbers.keys()) {
-    phoneCandidates.add(number);
-    phoneCandidates.add(`+${number}`);
-    if (number.startsWith('91')) {
-      const localNumber = number.slice(2);
-      phoneCandidates.add(localNumber);
-      phoneCandidates.add(`+${localNumber}`);
-      phoneCandidates.add(`0${localNumber}`);
-    }
-  }
-  const customers = phoneCandidates.size
+  const phoneNumberCandidates = new Set([...uniqueNumbers.keys()].flatMap(phoneCandidates));
+  const customers = phoneNumberCandidates.size
     ? await Customer.find({
         $or: [
-          { whatsappId: { $in: [...phoneCandidates] } },
-          { phoneNumber: { $in: [...phoneCandidates] } },
+          { whatsappId: { $in: [...phoneNumberCandidates] } },
+          { phoneNumber: { $in: [...phoneNumberCandidates] } },
         ],
       })
         .select('_id whatsappId phoneNumber optInStatus')
@@ -226,7 +231,7 @@ async function assessRecipients(campaignId: Types.ObjectId, rows: ParsedRow[]): 
     else if (!customer) reason = 'No customer record matches this number';
     else if (customer.optInStatus === 'OPTED_OUT') reason = 'Customer has opted out of business messages';
     else if (customer.optInStatus !== 'OPTED_IN') reason = 'Customer consent is not recorded as opted in';
-    else if (!activeCustomerIds.has(String(customer._id))) {
+    else if (!hasApprovedTemplate && !activeCustomerIds.has(String(customer._id))) {
       reason = '24-hour service window expired; an approved template flow is required';
     }
     const canSend = !reason && Boolean(customer);
@@ -275,6 +280,119 @@ function campaignIdOrThrow(id: unknown): Types.ObjectId {
     throw new ApiError(404, 'Campaign not found', 'NOT_FOUND');
   }
   return new Types.ObjectId(id);
+}
+
+type RecipientOptInResult = {
+  recipientId: string;
+  phoneNumber: string;
+  recorded: boolean;
+  eligible: boolean;
+  reason: string;
+};
+
+const CONSENT_PENDING_REASONS = [
+  'No customer record matches this number',
+  'Customer consent is not recorded as opted in',
+];
+
+async function recordCampaignRecipientOptIn(
+  campaignId: Types.ObjectId,
+  recipientId: Types.ObjectId,
+  consentSource: string,
+  hasApprovedTemplate: boolean,
+): Promise<RecipientOptInResult> {
+  const recipient = await BulkCampaignRecipient.findOne({
+    _id: recipientId,
+    campaignId,
+    status: 'UNSENT',
+    eligible: false,
+    reason: { $in: CONSENT_PENDING_REASONS },
+  });
+  if (!recipient) {
+    return {
+      recipientId: recipientId.toString(),
+      phoneNumber: '',
+      recorded: false,
+      eligible: false,
+      reason: 'Recipient is not an unsent consent-pending contact',
+    };
+  }
+  const phoneNumber = normalizePhone(recipient.phoneNumber);
+  if (!phoneNumber) {
+    return {
+      recipientId: recipientId.toString(),
+      phoneNumber: recipient.phoneNumber,
+      recorded: false,
+      eligible: false,
+      reason: 'Recipient phone number is invalid',
+    };
+  }
+
+  const candidates = phoneCandidates(phoneNumber);
+  const matches = await Customer.find({
+    $or: [{ whatsappId: { $in: candidates } }, { phoneNumber: { $in: candidates } }],
+  }).select('_id whatsappId phoneNumber optInStatus');
+  const uniqueMatches = [...new Map(matches.map((customer) => [String(customer._id), customer])).values()];
+  if (uniqueMatches.length > 1) {
+    return {
+      recipientId: recipientId.toString(),
+      phoneNumber,
+      recorded: false,
+      eligible: false,
+      reason: 'This phone number matches multiple customer records',
+    };
+  }
+  let customer = uniqueMatches[0];
+  if (customer?.optInStatus === 'OPTED_OUT') {
+    return {
+      recipientId: recipientId.toString(),
+      phoneNumber,
+      recorded: false,
+      eligible: false,
+      reason: 'Customer has opted out of business messages',
+    };
+  }
+  if (customer?.optInStatus === 'OPTED_IN') {
+    return {
+      recipientId: recipientId.toString(),
+      phoneNumber,
+      recorded: false,
+      eligible: false,
+      reason: 'Customer is already opted in; refresh the campaign preview',
+    };
+  }
+  if (customer) {
+    customer.phoneNumber = phoneNumber;
+    customer.optInStatus = 'OPTED_IN';
+    customer.optInAt = new Date();
+    customer.optInSource = consentSource;
+    await customer.save();
+  } else {
+    customer = await Customer.create({
+      whatsappId: phoneNumber,
+      phoneNumber,
+      optInStatus: 'OPTED_IN',
+      optInAt: new Date(),
+      optInSource: consentSource,
+    });
+  }
+
+  const activeConversation = hasApprovedTemplate
+    ? true
+    : Boolean(
+        await Conversation.exists({
+          customerId: customer._id,
+          status: { $in: ['OPEN', 'HUMAN_HANDOVER'] },
+          lastInteractionAt: { $gt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+        }),
+      );
+  const eligible = Boolean(hasApprovedTemplate || activeConversation);
+  const reason = eligible ? '' : '24-hour service window expired; an approved template flow is required';
+  await BulkCampaignRecipient.updateOne(
+    { _id: recipient._id, campaignId, status: 'UNSENT', eligible: false },
+    { $set: { customerId: customer._id, eligible, reason } },
+  );
+  return { recipientId: recipientId.toString(), phoneNumber, recorded: true, eligible, reason };
 }
 
 function uploadedBuffer(request: Request): Buffer {
@@ -334,7 +452,7 @@ bulkCampaignsRouter.get(
     res
       .type('text/csv')
       .setHeader('Content-Disposition', 'attachment; filename="ncut-whatsapp-contacts-sample.csv"')
-      .send('Phone Number\r\n');
+      .send('Phone Number,Example\r\nnot-a-valid-phone,Always skipped: invalid phone number\r\n');
   },
 );
 
@@ -344,8 +462,12 @@ bulkCampaignsRouter.get(
   asyncHandler(async (_req, res) => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('WhatsApp Contacts');
-    sheet.columns = [{ header: 'Phone Number', key: 'phoneNumber', width: 24 }];
+    sheet.columns = [
+      { header: 'Phone Number', key: 'phoneNumber', width: 24 },
+      { header: 'Example', key: 'example', width: 44 },
+    ];
     sheet.getRow(1).font = { bold: true };
+    sheet.addRow({ phoneNumber: 'not-a-valid-phone', example: 'Always skipped: invalid phone number' });
     const bytes = await workbook.xlsx.writeBuffer();
     res
       .type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
@@ -394,7 +516,16 @@ bulkCampaignsRouter.post(
   ...adminOnly,
   asyncHandler(async (req, res) => {
     const input = campaignInputSchema.parse(req.body);
-    if (!input.message && !input.attachment) {
+    const template = input.messageTemplateId
+      ? await MessageTemplate.findOne({ _id: input.messageTemplateId, metaStatus: 'APPROVED' }).lean()
+      : null;
+    if (input.messageTemplateId && (!template || !template.metaTemplateId)) {
+      throw new ApiError(400, 'Select an approved Meta template with its Meta template ID registered', 'APPROVED_TEMPLATE_REQUIRED');
+    }
+    if (input.messageTemplateId && (input.attachment || input.message)) {
+      throw new ApiError(400, 'Template campaigns cannot include free-form text or a separate attachment', 'INVALID_TEMPLATE_CAMPAIGN');
+    }
+    if (!input.messageTemplateId && !input.message && !input.attachment) {
       throw new ApiError(400, 'Add a message or an attachment before creating a campaign', 'CAMPAIGN_CONTENT_REQUIRED');
     }
     if (input.attachment && input.message.length > 1024) {
@@ -418,6 +549,7 @@ bulkCampaignsRouter.post(
     }
     const campaign = await BulkCampaign.create({
       ...input,
+      ...(input.messageTemplateId ? { messageTemplateId: input.messageTemplateId } : {}),
       createdBy: (req as AuthenticatedRequest).user?.id,
     });
     await recordActivity({
@@ -455,7 +587,13 @@ bulkCampaignsRouter.post(
     }
     const buffer = uploadedBuffer(req);
     const rows = await parseImport(buffer, req.header('content-type')?.split(';')[0]?.trim());
-    const { recipients, duplicates, eligible } = await assessRecipients(campaignId, rows);
+    const template = campaign.messageTemplateId
+      ? await MessageTemplate.findOne({ _id: campaign.messageTemplateId, metaStatus: 'APPROVED' }).lean()
+      : null;
+    if (campaign.messageTemplateId && (!template || !template.metaTemplateId)) {
+      throw new ApiError(409, 'The campaign template is no longer approved or has no Meta template ID', 'APPROVED_TEMPLATE_REQUIRED');
+    }
+    const { recipients, duplicates, eligible } = await assessRecipients(campaignId, rows, Boolean(template));
     await BulkCampaignRecipient.insertMany(recipients, { ordered: true });
     campaign.inputRows = rows.length;
     campaign.duplicateRows = duplicates;
@@ -576,7 +714,7 @@ bulkCampaignsRouter.get(
     const filter = { campaignId, ...(status ? { status } : {}) };
     const [items, total, statusCounts] = await Promise.all([
       BulkCampaignRecipient.find(filter)
-        .populate('customerId', 'name profileName phoneNumber')
+        .populate('customerId', 'name profileName phoneNumber optInStatus')
         .sort({ sourceRow: 1 })
         .skip((page - 1) * limit)
         .limit(limit)
@@ -592,6 +730,260 @@ bulkCampaignsRouter.get(
 );
 
 bulkCampaignsRouter.post(
+  '/:id/recipients/:recipientId/record-opt-in',
+  ...adminOnly,
+  asyncHandler(async (req, res) => {
+    const campaignId = campaignIdOrThrow(req.params.id);
+    const recipientId = campaignIdOrThrow(req.params.recipientId);
+    const input = z
+      .object({
+        consentSource: z.string().trim().min(1).max(500),
+        confirmed: z.literal(true),
+      })
+      .strict()
+      .parse(req.body);
+    const campaign = await BulkCampaign.findById(campaignId);
+    if (!campaign) throw new ApiError(404, 'Campaign not found', 'NOT_FOUND');
+    if (campaign.status !== 'READY') {
+      throw new ApiError(409, 'Consent can only be recorded for a campaign that is ready for preview', 'CAMPAIGN_NOT_READY');
+    }
+    const template = campaign.messageTemplateId
+      ? await MessageTemplate.findOne({ _id: campaign.messageTemplateId, metaStatus: 'APPROVED' }).lean()
+      : null;
+    if (campaign.messageTemplateId && (!template || !template.metaTemplateId)) {
+      throw new ApiError(409, 'The campaign template is no longer approved', 'APPROVED_TEMPLATE_REQUIRED');
+    }
+    const result = await recordCampaignRecipientOptIn(campaignId, recipientId, input.consentSource, Boolean(template));
+    if (!result.recorded) {
+      throw new ApiError(
+        result.reason.includes('already opted in') ? 409 : 400,
+        result.reason,
+        result.reason.includes('already opted in') ? 'CUSTOMER_ALREADY_OPTED_IN' : 'CONSENT_NOT_RECORDED',
+      );
+    }
+    campaign.eligibleRecipients = await BulkCampaignRecipient.countDocuments({
+      campaignId,
+      status: 'UNSENT',
+      eligible: true,
+    });
+    await campaign.save();
+
+    const user = (req as AuthenticatedRequest).user;
+    await recordActivity({
+      source: 'USER',
+      action: 'BULK_CAMPAIGN_RECIPIENT_OPT_IN_RECORDED',
+      summary: `Recorded verified opt-in for recipient ${result.phoneNumber} in campaign "${campaign.name}"`,
+      resourceType: 'bulk-campaign',
+      resourceId: campaign.id,
+      actorId: user?.id,
+      actorRole: 'ADMIN',
+    });
+    res.json({
+      success: true,
+      data: { ...result, eligibleRecipients: campaign.eligibleRecipients },
+    });
+  }),
+);
+
+bulkCampaignsRouter.post(
+  '/:id/recipients/record-opt-in-bulk',
+  ...adminOnly,
+  asyncHandler(async (req, res) => {
+    const campaignId = campaignIdOrThrow(req.params.id);
+    const input = z
+      .object({
+        recipientIds: z
+          .array(z.string().regex(/^[a-f\d]{24}$/i))
+          .min(1)
+          .max(100)
+          .transform((ids) => [...new Set(ids)]),
+        consentSource: z.string().trim().min(1).max(500),
+        confirmed: z.literal(true),
+      })
+      .strict()
+      .parse(req.body);
+    const campaign = await BulkCampaign.findById(campaignId);
+    if (!campaign) throw new ApiError(404, 'Campaign not found', 'NOT_FOUND');
+    if (campaign.status !== 'READY') {
+      throw new ApiError(409, 'Consent can only be recorded for a campaign that is ready for preview', 'CAMPAIGN_NOT_READY');
+    }
+    const template = campaign.messageTemplateId
+      ? await MessageTemplate.findOne({ _id: campaign.messageTemplateId, metaStatus: 'APPROVED' }).lean()
+      : null;
+    if (campaign.messageTemplateId && (!template || !template.metaTemplateId)) {
+      throw new ApiError(409, 'The campaign template is no longer approved', 'APPROVED_TEMPLATE_REQUIRED');
+    }
+
+    const results: RecipientOptInResult[] = [];
+    for (const id of input.recipientIds) {
+      results.push(
+        await recordCampaignRecipientOptIn(
+          campaignId,
+          new Types.ObjectId(id),
+          input.consentSource,
+          Boolean(template),
+        ),
+      );
+    }
+    campaign.eligibleRecipients = await BulkCampaignRecipient.countDocuments({
+      campaignId,
+      status: 'UNSENT',
+      eligible: true,
+    });
+    await campaign.save();
+
+    const recorded = results.filter((result) => result.recorded);
+    const skipped = results.filter((result) => !result.recorded);
+    const user = (req as AuthenticatedRequest).user;
+    await recordActivity({
+      source: 'USER',
+      action: 'BULK_CAMPAIGN_RECIPIENT_OPT_IN_BULK_RECORDED',
+      summary: `Recorded verified opt-in for ${recorded.length} recipient(s) and skipped ${skipped.length} in campaign "${campaign.name}"`,
+      resourceType: 'bulk-campaign',
+      resourceId: campaign.id,
+      actorId: user?.id,
+      actorRole: 'ADMIN',
+    });
+    res.json({
+      success: true,
+      data: {
+        requested: input.recipientIds.length,
+        recorded: recorded.length,
+        eligible: recorded.filter((result) => result.eligible).length,
+        skipped: skipped.length,
+        eligibleRecipients: campaign.eligibleRecipients,
+        recipients: results,
+      },
+    });
+  }),
+);
+
+bulkCampaignsRouter.post(
+  '/:id/recipients/retry-failed',
+  ...adminOnly,
+  asyncHandler(async (req, res) => {
+    const campaignId = campaignIdOrThrow(req.params.id);
+    const input = z
+      .object({
+        recipientIds: z
+          .array(z.string().regex(/^[a-f\d]{24}$/i))
+          .min(1)
+          .max(100)
+          .transform((ids) => [...new Set(ids)]),
+        confirmed: z.literal(true),
+      })
+      .strict()
+      .parse(req.body);
+    const campaign = await BulkCampaign.findById(campaignId);
+    if (!campaign) throw new ApiError(404, 'Campaign not found', 'NOT_FOUND');
+    if (campaign.status !== 'COMPLETED') {
+      throw new ApiError(409, 'Failed recipients can only be retried after the campaign is completed', 'CAMPAIGN_NOT_COMPLETED');
+    }
+
+    const template = campaign.messageTemplateId
+      ? await MessageTemplate.findOne({ _id: campaign.messageTemplateId, metaStatus: 'APPROVED' })
+          .select('_id metaTemplateId')
+          .lean()
+      : null;
+    if (campaign.messageTemplateId && (!template || !template.metaTemplateId)) {
+      throw new ApiError(409, 'The campaign template is no longer approved', 'APPROVED_TEMPLATE_REQUIRED');
+    }
+
+    const selectedRecipients = await BulkCampaignRecipient.find({
+      campaignId,
+      _id: { $in: input.recipientIds },
+      status: 'FAILED',
+      eligible: true,
+      attempts: { $lt: MAX_RECIPIENT_ATTEMPTS },
+      lastError: { $not: /^WhatsApp accepted the send \(/ },
+    })
+      .select('_id customerId lastError')
+      .lean();
+    const customerIds = [...new Set(selectedRecipients.flatMap((recipient) => (recipient.customerId ? [String(recipient.customerId)] : [])))];
+    const optedInCustomers = await Customer.find({
+      _id: { $in: customerIds },
+      optInStatus: 'OPTED_IN',
+    })
+      .select('_id')
+      .lean();
+    const optedInCustomerIds = new Set(optedInCustomers.map((customer) => String(customer._id)));
+    let activeConversationCustomerIds = new Set<string>();
+    if (!template && customerIds.length) {
+      const activeCustomers = await Conversation.distinct('customerId', {
+        customerId: { $in: customerIds },
+        status: { $in: ['OPEN', 'HUMAN_HANDOVER'] },
+        lastInteractionAt: { $gt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+      });
+      activeConversationCustomerIds = new Set(activeCustomers.map(String));
+    }
+    const retryableRecipients = selectedRecipients.filter(
+      (recipient) =>
+        recipient.customerId &&
+        optedInCustomerIds.has(String(recipient.customerId)) &&
+        (Boolean(template) || activeConversationCustomerIds.has(String(recipient.customerId))),
+    );
+    if (!retryableRecipients.length) {
+      return res.json({
+        success: true,
+        data: { requested: input.recipientIds.length, queued: 0, skipped: input.recipientIds.length },
+      });
+    }
+
+    const retryableIds = retryableRecipients.map((recipient) => recipient._id);
+    const retryErrors = new Map(retryableRecipients.map((recipient) => [String(recipient._id), recipient.lastError]));
+    const update = await BulkCampaignRecipient.updateMany(
+      {
+        campaignId,
+        _id: { $in: retryableIds },
+        status: 'FAILED',
+        eligible: true,
+        attempts: { $lt: MAX_RECIPIENT_ATTEMPTS },
+      },
+      { $set: { status: 'QUEUED', lastError: '' } },
+    );
+    const queued = update.modifiedCount;
+    if (queued > 0) {
+      const queuedCampaign = await BulkCampaign.findOneAndUpdate(
+        { _id: campaignId, status: 'COMPLETED' },
+        {
+          $set: { status: 'QUEUED', eligibleRecipients: queued, startedAt: new Date() },
+          $unset: { completedAt: 1 },
+        },
+        { new: true },
+      );
+      if (!queuedCampaign) {
+        const currentCampaign = await BulkCampaign.findById(campaignId).select('status').lean();
+        if (!currentCampaign || !['QUEUED', 'PROCESSING'].includes(currentCampaign.status)) {
+          for (const [recipientId, lastError] of retryErrors) {
+            await BulkCampaignRecipient.updateOne(
+              { _id: recipientId, campaignId, status: 'QUEUED' },
+              { $set: { status: 'FAILED', lastError: lastError ?? '' } },
+            );
+          }
+          throw new ApiError(409, 'The campaign changed while failed recipients were being queued; refresh and try again', 'CAMPAIGN_STATE_CHANGED');
+        }
+      }
+
+      const user = (req as AuthenticatedRequest).user;
+      await recordActivity({
+        source: 'USER',
+        action: 'BULK_CAMPAIGN_FAILED_RECIPIENTS_RETRY_QUEUED',
+        summary: `Queued ${queued} failed recipient(s) for a manual retry in campaign "${campaign.name}"`,
+        resourceType: 'bulk-campaign',
+        resourceId: campaign.id,
+        actorId: user?.id,
+        actorRole: 'ADMIN',
+      });
+    }
+
+    res.status(202).json({
+      success: true,
+      data: { requested: input.recipientIds.length, queued, skipped: input.recipientIds.length - queued },
+    });
+  }),
+);
+
+bulkCampaignsRouter.post(
   '/:id/send',
   ...adminOnly,
   asyncHandler(async (req, res) => {
@@ -600,7 +992,7 @@ bulkCampaignsRouter.post(
     if (!campaign) throw new ApiError(404, 'Campaign not found', 'NOT_FOUND');
     if (campaign.status !== 'READY') throw new ApiError(409, 'Only a previewed campaign can be sent', 'CAMPAIGN_NOT_READY');
     if (campaign.eligibleRecipients < 1) {
-      throw new ApiError(409, 'There are no opted-in recipients with an open 24-hour service window', 'NO_ELIGIBLE_RECIPIENTS');
+      throw new ApiError(409, 'There are no eligible opted-in recipients for this campaign', 'NO_ELIGIBLE_RECIPIENTS');
     }
     await BulkCampaignRecipient.updateMany(
       { campaignId, eligible: true, status: 'UNSENT' },

@@ -12,6 +12,7 @@ A TypeScript monorepo for managing an abrasive-product catalogue, automating pro
 - Stateful catalogue discovery, seven-day conversation expiry, opt-out handling, unique product interest tracking, and one-time third-product prompt.
 - Human handover, sales lead creation, and configurable log/webhook notification.
 - Product, customer, conversation, lead, team, template, authentication, and dashboard APIs.
+- Consent-evidence CSV/XLSX customer imports and eligibility-checked bulk campaigns for approved templates or service-window messages.
 - Self-service account email/password changes with prior-session invalidation and accessible show/hide password controls.
 - Responsive authenticated React dashboard, optimistic catalogue entry with local image uploads, QR click-to-chat builder, and an unread-aware WhatsApp conversation inbox.
 - Zod request validation, JWT roles/revocation, bcrypt passwords, Helmet, CORS, rate limits, structured logs, and safe API errors.

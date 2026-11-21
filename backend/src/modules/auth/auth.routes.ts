@@ -37,6 +37,7 @@ const loginLimiter = rateLimit({
   limit: 10,
   standardHeaders: 'draft-7',
   legacyHeaders: false,
+  skip: () => env.NODE_ENV === 'test',
 });
 
 authRouter.post(

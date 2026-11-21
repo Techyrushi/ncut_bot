@@ -8,6 +8,7 @@
 - Use a replica set/Atlas deployment if future operations require transactions.
 - Configure a secret manager, rotation process, restricted access, and separate credentials per environment.
 - Deploy backend and frontend separately behind HTTPS. Set CORS to the exact dashboard origin.
+- The backend binds to loopback behind Apache. Express trusts only loopback as its reverse proxy so API and login rate limits use the forwarded client IP instead of combining all visitors under `127.0.0.1`. The general API bucket allows 1,000 requests per client IP per 15 minutes; login remains limited to 10 per 15 minutes and WhatsApp webhooks to 120 per minute. Keep Apache as the only path to the backend and preserve its `X-Forwarded-For` header.
 - Set up a Meta system-user token, approved templates, business verification, webhook callback, and production phone number.
 - Enter verified products and confirm images are publicly fetchable by Meta.
 - Set `APP_URL` to the public HTTPS API origin and persist the backend `uploads` directory. Docker Compose mounts it at `/app/uploads`; for a host-based deployment, create `/var/www/ncut-app/uploads` and grant write access to `ncut-app`.

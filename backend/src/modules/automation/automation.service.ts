@@ -45,6 +45,7 @@ type IncomingMessage = {
   timestamp: string;
   type: string;
   text?: { body?: string };
+  button?: { text?: string; payload?: string };
   image?: { id?: string; caption?: string };
   interactive?: {
     button_reply?: { id: string; title: string };
@@ -119,6 +120,7 @@ function isDeliveryAction(value: unknown): value is DeliveryAction {
 
 function messageContent(message: IncomingMessage): Record<string, unknown> {
   if (message.text) return { text: message.text.body ?? '' };
+  if (message.button) return { button: message.button };
   if (message.interactive?.button_reply) return { interactive: message.interactive.button_reply };
   if (message.interactive?.list_reply) return { interactive: message.interactive.list_reply };
   if (message.image) return { image: message.image };
@@ -308,7 +310,25 @@ export class AutomationService {
 
   private selection(message: IncomingMessage): { id: string } | undefined {
     const selected = message.interactive?.button_reply ?? message.interactive?.list_reply;
-    return selected ? { id: selected.id } : undefined;
+    if (selected) return { id: selected.id };
+    if (!message.button) return undefined;
+
+    const aliases: Record<string, string> = {
+      explore_products: 'explore_products',
+      explore_our_products: 'explore_products',
+      connect_sales: 'connect_sales',
+      connect_with_team: 'connect_sales',
+      connect_with_our_team: 'connect_sales',
+    };
+    const candidates = [message.button.payload, message.button.text].filter(
+      (value): value is string => Boolean(value?.trim()),
+    );
+    for (const candidate of candidates) {
+      const normalized = candidate.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+      const id = aliases[normalized];
+      if (id) return { id };
+    }
+    return candidates[0] ? { id: candidates[0] } : undefined;
   }
 
   private async saveInbound(
@@ -325,7 +345,7 @@ export class AutomationService {
           conversationId,
           whatsappMessageId: message.id,
           direction: 'INBOUND',
-          messageType: message.interactive
+          messageType: message.interactive || message.button
             ? 'INTERACTIVE'
             : ['TEXT', 'IMAGE', 'TEMPLATE'].includes(message.type.toUpperCase())
               ? message.type.toUpperCase()

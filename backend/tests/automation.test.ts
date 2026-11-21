@@ -652,6 +652,47 @@ describe('catalogue automation', () => {
     });
   });
 
+  it('routes approved-template quick replies through the welcome selections', async () => {
+    fakeMetaSend();
+    await Product.create({
+      name: 'Template button product',
+      slug: 'template-button-product',
+      description: 'A product selected from the welcome template.',
+      category: 'Abrasives',
+    });
+    const timestamp = String(Math.floor(Date.now() / 1000));
+
+    await automationService.processIncoming({
+      id: 'template-explore',
+      from: '15550003340',
+      timestamp,
+      type: 'button',
+      button: { text: 'Explore our products', payload: 'explore_products' },
+    });
+    const exploreConversation = await Conversation.findOne({
+      customerId: (await Customer.findOne({ whatsappId: '15550003340' }))?._id,
+    });
+    expect(exploreConversation?.currentStep).toBe('PRODUCT_MENU');
+    expect(await Message.findOne({ whatsappMessageId: 'template-explore' }).lean()).toMatchObject({
+      messageType: 'INTERACTIVE',
+      content: { button: { text: 'Explore our products', payload: 'explore_products' } },
+    });
+
+    await automationService.processIncoming({
+      id: 'template-connect',
+      from: '15550003341',
+      timestamp,
+      type: 'button',
+      button: { text: 'Connect with team', payload: 'Connect with team' },
+    });
+    const connectCustomer = await Customer.findOne({ whatsappId: '15550003341' });
+    const connectConversation = await Conversation.findOne({ customerId: connectCustomer?._id });
+    expect(connectConversation?.status).toBe('HUMAN_HANDOVER');
+    expect(await Lead.findOne({ conversationId: connectConversation?._id })).toMatchObject({
+      requirement: 'Customer asked to connect with the sales team',
+    });
+  });
+
   it('counts unique product interests atomically and sends the third-interest prompt once', async () => {
     fakeMetaSend();
     const products = await Product.create([

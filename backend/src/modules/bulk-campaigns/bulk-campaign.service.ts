@@ -2,6 +2,7 @@ import { BulkCampaign, BulkCampaignRecipient } from '../../database/models/bulk-
 import { Conversation } from '../../database/models/conversation.model';
 import { Customer } from '../../database/models/customer.model';
 import { Message } from '../../database/models/message.model';
+import { MessageTemplate } from '../../database/models/message-template.model';
 import { logger } from '../../config/logger';
 import { recordSystemActivity } from '../logs/activity-log';
 import { whatsappService } from '../whatsapp/whatsapp.service';
@@ -110,12 +111,29 @@ async function processOneRecipient(): Promise<void> {
       return;
     }
 
-    const conversation = await Conversation.findOne({
+    const template = campaign.messageTemplateId
+      ? await MessageTemplate.findOne({ _id: campaign.messageTemplateId, metaStatus: 'APPROVED' }).lean()
+      : null;
+    if (campaign.messageTemplateId && (!template || !template.metaTemplateId)) {
+      await BulkCampaignRecipient.updateOne(
+        { _id: recipient._id },
+        {
+          $set: {
+            status: 'UNSENT',
+            eligible: false,
+            reason: 'The campaign template is no longer approved or has no Meta template ID',
+          },
+        },
+      );
+      return;
+    }
+
+    let conversation = await Conversation.findOne({
       customerId: customer._id,
       status: { $in: ['OPEN', 'HUMAN_HANDOVER'] },
-      lastInteractionAt: { $gt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+      ...(!template ? { lastInteractionAt: { $gt: new Date(Date.now() - 24 * 60 * 60 * 1000) } } : {}),
     }).sort({ lastInteractionAt: -1 });
-    if (!conversation) {
+    if (!conversation && !template) {
       await BulkCampaignRecipient.updateOne(
         { _id: recipient._id },
         {
@@ -128,21 +146,46 @@ async function processOneRecipient(): Promise<void> {
       );
       return;
     }
+    if (!conversation && template) {
+      conversation = await Conversation.create({ customerId: customer._id, status: 'OPEN', currentStep: 'NEW' });
+    }
+    if (!conversation) throw new Error('Unable to create or locate a conversation for this campaign recipient');
 
     const attachment = campaign.attachment;
-    const to = customer.whatsappId;
+    const to = customer.phoneNumber?.replace(/\D/g, '') || customer.whatsappId;
     let whatsappMessageId: string;
-    let messageType: 'TEXT' | 'IMAGE' | 'VIDEO' | 'DOCUMENT';
+    let messageType: 'TEXT' | 'IMAGE' | 'VIDEO' | 'DOCUMENT' | 'TEMPLATE';
     const text = campaign.message;
-    if (!attachment) {
+    let content: Record<string, unknown>;
+    if (template) {
+      const components = campaign.templateComponents.length
+        ? campaign.templateComponents
+        : template.defaultSendComponents;
+      whatsappMessageId = await whatsappService.sendTemplate(
+        to,
+        template.name,
+        template.languageCode,
+        components,
+      );
+      messageType = 'TEMPLATE';
+      content = {
+        templateId: template.metaTemplateId,
+        templateName: template.name,
+        languageCode: template.languageCode,
+        components,
+      };
+    } else if (!attachment) {
       whatsappMessageId = await whatsappService.sendText(to, text);
       messageType = 'TEXT';
+      content = { text };
     } else if (attachment.type === 'IMAGE') {
       whatsappMessageId = await whatsappService.sendImage(to, attachment.url, text || undefined);
       messageType = 'IMAGE';
+      content = { text, image: { url: attachment.url, filename: attachment.filename } };
     } else if (attachment.type === 'VIDEO') {
       whatsappMessageId = await whatsappService.sendVideo(to, attachment.url, text || undefined);
       messageType = 'VIDEO';
+      content = { text, video: { url: attachment.url, filename: attachment.filename } };
     } else {
       whatsappMessageId = await whatsappService.sendDocument(
         to,
@@ -151,6 +194,7 @@ async function processOneRecipient(): Promise<void> {
         text || undefined,
       );
       messageType = 'DOCUMENT';
+      content = { text, document: { url: attachment.url, filename: attachment.filename } };
     }
     acceptedMessageId = whatsappMessageId;
 
@@ -162,9 +206,7 @@ async function processOneRecipient(): Promise<void> {
       bulkRecipientId: recipient._id,
       direction: 'OUTBOUND',
       messageType,
-      content: attachment
-        ? { text, [attachment.type.toLowerCase()]: { url: attachment.url, filename: attachment.filename } }
-        : { text },
+      content,
       status: 'SENT',
       timestamp: new Date(),
     });

@@ -21,6 +21,8 @@ Login obtains a bearer token. Supply it as `Authorization: Bearer <token>` on pr
 | PUT       | `/products/:id`                                          | Admin               | Partial update; validates supplied fields                                              |
 | DELETE    | `/products/:id`                                          | Admin               | Soft archive                                                                           |
 | GET       | `/customers?page=&limit=&search=&optInStatus=`            | Admin/Sales         | Search customers and filter by `UNKNOWN`, `OPTED_IN`, or `OPTED_OUT`                   |
+| GET       | `/customers/import-sample.xlsx`                          | Admin               | Download the consent-import spreadsheet header template                                |
+| POST      | `/customers/import`                                      | Admin               | Raw CSV/XLSX with phone, `OPTED_IN`, ISO consent date, and consent source; requires `X-Consent-Verified: true` |
 | GET       | `/customers/:id`                                         | Admin/Sales         | Customer details                                                                       |
 | PATCH     | `/customers/:id/opt-in`                                  | Admin/Sales         | `{status,source}`; record verified consent or opt-out                                  |
 | GET       | `/conversations?status=`                                 | Admin/Sales         | Paginated conversations with customer                                                  |
@@ -39,7 +41,10 @@ Login obtains a bearer token. Supply it as `Authorization: Bearer <token>` on pr
 | POST      | `/bulk-campaigns/:id/import`                             | Admin               | Raw CSV/XLSX upload; deduplicates numbers and previews consent/window eligibility        |
 | GET       | `/bulk-campaigns?page=&limit=`                           | Admin               | Campaign history and per-recipient delivery counts                                      |
 | GET       | `/bulk-campaigns/:id?status=&page=&limit=`               | Admin               | Campaign details and recipient-level UNSENT/QUEUED/SENT/DELIVERED/READ/FAILED activity  |
+| POST      | `/bulk-campaigns/:id/recipients/:recipientId/record-opt-in` | Admin             | `{consentSource,confirmed:true}`; records verified consent for one unsent recipient in a READY campaign |
+| POST      | `/bulk-campaigns/:id/recipients/record-opt-in-bulk`      | Admin               | `{recipientIds,consentSource,confirmed:true}`; records verified consent for up to 100 selected unknown/non-consented contacts; opted-out, ambiguous, and invalid numbers are skipped |
 | POST      | `/bulk-campaigns/:id/send`                               | Admin               | Queue the previewed eligible recipients for paced sending                              |
+| POST      | `/bulk-campaigns/:id/recipients/retry-failed`             | Admin               | `{recipientIds,confirmed:true}`; manually retries up to 100 selected failed recipients through the paced queue; requires a still-opted-in customer and approved template, skips previously accepted sends, and allows one retry per recipient |
 | GET       | `/bulk-campaigns/:id/export.csv?status=`                 | Admin               | Export recipient activity; optional status filter                                       |
 | GET/POST  | `/team`                                                  | Admin/Sales / Admin | List or add a sales account                                                            |
 | PATCH     | `/team/:id`                                              | Admin               | `{isActive}`                                                                           |
@@ -104,7 +109,8 @@ Content-Type: application/json
 
 - Product IDs and user IDs are MongoDB ObjectIds.
 - Set `APP_URL` to the public HTTPS API origin so uploaded product images can be fetched by WhatsApp. Keep the upload directory persistent (`/app/uploads` in Compose).
-- Bulk campaigns accept CSV/XLSX files up to 5 MiB, 5,000 populated rows, and 500 unique recipients. Numbers are normalized to E.164 (10-digit numbers default to India `+91`); duplicates are skipped. Only existing customers with recorded opt-in and an active 24-hour service window are queued. Unknown, opted-out, non-consented, and expired-window rows remain unsent; this flow does not send templates.
+- Customer consent imports accept CSV/XLSX files up to 5 MiB and 500 unique contacts. Every row must include a phone number, `OPTED_IN`, an ISO consent date, and consent source; the admin must affirm verified consent. Imported opt-outs are never overridden.
+- Bulk campaigns accept CSV/XLSX files up to 5 MiB, 5,000 populated rows, and 500 unique recipients. Numbers are normalized to E.164 (10-digit numbers default to India `+91`); duplicates are skipped. Only existing customers with recorded opt-in and an active 24-hour service window are queued. Unknown, opted-out, non-consented, and expired-window rows remain unsent; approved templates can send outside that window.
 - Campaign media supports JPEG/PNG (5 MiB), MP4 video (16 MiB), and PDF/Office/TXT documents (20 MiB). Each recipient is paced through a durable queue and independently tracked; webhook status events update delivery/read records. Interrupted sends are marked failed for manual verification rather than automatically retried, to avoid duplicate messages.
 - Pagination defaults to 20 and is capped at 100.
 - `DELETE /products/:id` archives rather than physically deleting historical references.

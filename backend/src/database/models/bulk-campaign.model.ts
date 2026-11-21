@@ -14,6 +14,8 @@ const bulkCampaignSchema = new Schema(
   {
     name: { type: String, required: true, trim: true, maxlength: 120 },
     message: { type: String, trim: true, maxlength: 4096, default: '' },
+    messageTemplateId: { type: Schema.Types.ObjectId, ref: 'MessageTemplate' },
+    templateComponents: { type: [Schema.Types.Mixed], default: [] },
     attachment: { type: campaignAttachmentSchema },
     createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     status: {
