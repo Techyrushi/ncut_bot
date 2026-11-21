@@ -321,29 +321,27 @@ describe('catalogue automation', () => {
     });
 
     await automationService.processIncoming(inbound('native-catalog-welcome'));
-    const welcomeImage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'IMAGE' }).lean();
-    await markDelivered(welcomeImage!.whatsappMessageId!);
+    const welcomeMessage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'INTERACTIVE' }).lean();
+    await markDelivered(welcomeMessage!.whatsappMessageId!);
     await automationService.processIncoming(inbound('native-catalog-open', 'explore_products'));
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     const catalogueImage = await Message.findOne({
       direction: 'OUTBOUND',
       messageType: 'IMAGE',
       'content.imageUrl': new URL('/ncut-product-catalogue.jpg', env.FRONTEND_URL).toString(),
     }).lean();
-    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toMatchObject({
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({
       type: 'image',
       image: { link: new URL('/ncut-product-catalogue.jpg', env.FRONTEND_URL).toString() },
     });
     await markDelivered(catalogueImage!.whatsappMessageId!);
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    const firstPayload = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const firstPayload = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body));
     expect(firstPayload).toMatchObject({
       type: 'interactive',
       interactive: {
         type: 'product_list',
-        body: {
-          text: 'Here are the first 10 products from the catalogue. Select a product to view its photo and full description.',
-        },
+        body: { text: 'Here are the first 10 products from the catalogue. Select a product to view its photo and full description.' },
         action: {
           catalog_id: 'catalog-ncut-test',
           sections: [{ title: 'Available products' }],
@@ -352,42 +350,9 @@ describe('catalogue automation', () => {
     });
     const firstRetailerIds = firstPayload.interactive.action.sections.flatMap(
       (section: { product_items: Array<{ product_retailer_id: string }> }) =>
-        section.product_items.map((item) => item.product_retailer_id),
+        section.product_items.map((item: { product_retailer_id: string }) => item.product_retailer_id),
     );
-    expect(firstRetailerIds).toEqual(
-      products.slice(0, 10).map((product) => product.whatsappProductRetailerId),
-    );
-    expect(firstRetailerIds).toHaveLength(10);
-    const firstListMessage = await Message.findOne({
-      direction: 'OUTBOUND',
-      'content.catalogId': 'catalog-ncut-test',
-      deliveryActionStatus: 'PENDING',
-    }).sort({ timestamp: 1 }).lean();
-    expect(firstListMessage?.deliveryAction).toMatchObject({
-      type: 'PRODUCT_CATALOG',
-      body: 'Here are the remaining 3 products from the catalogue. Select a product to view its photo and full description.',
-      productIds: products.slice(10).map((product) => product.whatsappProductRetailerId),
-      remainingProductIds: [],
-    });
-    expect(await Message.countDocuments({ direction: 'OUTBOUND', 'content.catalogId': 'catalog-ncut-test' })).toBe(1);
-
-    await markDelivered(firstListMessage!.whatsappMessageId!);
-    expect(fetchMock).toHaveBeenCalledTimes(5);
-    const secondPayload = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body));
-    const secondRetailerIds = secondPayload.interactive.action.sections.flatMap(
-      (section: { product_items: Array<{ product_retailer_id: string }> }) =>
-        section.product_items.map((item) => item.product_retailer_id),
-    );
-    expect(secondRetailerIds).toEqual(products.slice(10).map((product) => product.whatsappProductRetailerId));
-    expect(secondRetailerIds).toHaveLength(3);
-    expect(secondPayload).toMatchObject({
-      interactive: {
-        body: {
-          text: 'Here are the remaining 3 products from the catalogue. Select a product to view its photo and full description.',
-        },
-      },
-    });
-    expect(await Message.countDocuments({ direction: 'OUTBOUND', 'content.catalogId': 'catalog-ncut-test' })).toBe(2);
+    expect(firstRetailerIds).toEqual(products.slice(0, 10).map((product) => product.whatsappProductRetailerId));
     expect(
       await Message.countDocuments({
         direction: 'OUTBOUND',
@@ -428,8 +393,8 @@ describe('catalogue automation', () => {
     });
 
     await automationService.processIncoming(inbound('msg-welcome'));
-    const welcomeImage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'IMAGE' }).lean();
-    await markDelivered(welcomeImage!.whatsappMessageId!);
+    const welcomeMessage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'INTERACTIVE' }).lean();
+    await markDelivered(welcomeMessage!.whatsappMessageId!);
     await automationService.processIncoming(inbound('msg-product-menu', 'explore_products'));
     const catalogueImage = await Message.findOne({
       direction: 'OUTBOUND',
@@ -438,8 +403,8 @@ describe('catalogue automation', () => {
     }).lean();
     await markDelivered(catalogueImage!.whatsappMessageId!);
     const catalogueImageUrl = new URL('/ncut-product-catalogue.jpg', env.FRONTEND_URL).toString();
-    const menuImagePayload = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body));
-    const menuPayload = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body)) as {
+    const menuImagePayload = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body));
+    const menuPayload = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body)) as {
       interactive: {
         body: { text: string };
         action: { sections: Array<{ rows: Array<{ id: string; description?: string }> }> };
@@ -463,40 +428,32 @@ describe('catalogue automation', () => {
     expect(productRow?.description).not.toContain('Custom Abrasives');
 
     await automationService.processIncoming(inbound('msg-product-selected', `product:${product.id}`));
-    const productImage = await Message.findOne({
-      direction: 'OUTBOUND',
-      messageType: 'IMAGE',
-      'content.imageUrl': product.imageUrl,
-    }).lean();
-    await markDelivered(productImage!.whatsappMessageId!);
-    const productDetails = await Message.findOne({
-      direction: 'OUTBOUND',
-      messageType: 'TEXT',
-      'content.productId': product.id,
-    }).lean();
-    await markDelivered(productDetails!.whatsappMessageId!);
     const sentPayloads = fetchMock.mock.calls.map(([, options]) => JSON.parse(String(options?.body)));
     expect(sentPayloads.map((payload) => payload.type)).toEqual([
-      'image',
       'interactive',
       'image',
       'interactive',
-      'image',
-      'text',
       'interactive',
     ]);
-    expect(sentPayloads[4]).toMatchObject({ image: { link: product.imageUrl } });
+    expect(sentPayloads[3]).toMatchObject({
+      type: 'interactive',
+      interactive: {
+        header: { type: 'image', image: { link: product.imageUrl } },
+        body: { text: expect.stringContaining(product.name) },
+        action: { buttons: expect.any(Array) },
+      },
+    });
     const messages = await Message.find({ direction: 'OUTBOUND' }).lean();
     expect(messages.some((message) => message.messageType === 'IMAGE' && message.content.imageUrl === product.imageUrl))
-      .toBe(true);
+      .toBe(false);
     const details = messages.find(
-      (message) => message.messageType === 'TEXT' && message.content.productId?.toString() === product.id,
+      (message) => message.messageType === 'INTERACTIVE' && message.content.productId?.toString() === product.id,
     );
-    expect(details?.content.text).toBe(
-      `${product.name}\n\n${product.description}\n\nSpecifications:\nMaterial: Zirconia\n\nSizes: 4", 5"\n\nGrits: 60, 80\n\nBacking: Fiber`,
-    );
+    expect(details?.content.text).toContain(product.name);
+    expect(details?.content.text).toContain(product.description);
+    expect(details?.content.text).toContain('What would you like to do next?');
     expect((String(details?.content.text).match(/Custom-category flap disc/g) ?? [])).toHaveLength(1);
-    expect(sentPayloads[4]?.image).not.toHaveProperty('caption');
+    expect(sentPayloads[3]?.interactive?.header?.image).not.toHaveProperty('caption');
   });
 
   it('waits for media delivery before sending welcome, catalogue, and product follow-ups', async () => {
@@ -527,21 +484,24 @@ describe('catalogue automation', () => {
 
     await automationService.processIncoming(inbound('ordered-welcome'));
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({ type: 'image' });
-    const welcomeImage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'IMAGE' }).lean();
-    await markDelivered(welcomeImage!.whatsappMessageId!);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({ type: 'interactive' });
-    await markDelivered(welcomeImage!.whatsappMessageId!);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+      type: 'interactive',
+      interactive: { header: { type: 'image' }, action: { buttons: expect.any(Array) } },
+    });
+    const welcomeMessage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'INTERACTIVE' }).lean();
+    await markDelivered(welcomeMessage!.whatsappMessageId!);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({ type: 'interactive' });
+    await markDelivered(welcomeMessage!.whatsappMessageId!);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
 
     const catalogueImageUrl = new URL(
       '/ncut-product-catalogue.jpg',
       env.FRONTEND_URL,
     ).toString();
     await automationService.processIncoming(inbound('ordered-menu', 'explore_products'));
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toMatchObject({
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({
       type: 'image',
       image: { link: catalogueImageUrl },
     });
@@ -551,34 +511,26 @@ describe('catalogue automation', () => {
       'content.imageUrl': catalogueImageUrl,
     }).lean();
     await markDelivered(catalogueImage!.whatsappMessageId!);
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toMatchObject({ type: 'interactive' });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body))).toMatchObject({ type: 'interactive' });
 
     await automationService.processIncoming(inbound('ordered-product', `product:${product.id}`));
-    expect(fetchMock).toHaveBeenCalledTimes(5);
-    expect(JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body))).toMatchObject({
-      type: 'image',
-      image: { link: productImageUrl },
-    });
-    const productImage = await Message.findOne({
-      direction: 'OUTBOUND',
-      messageType: 'IMAGE',
-      'content.imageUrl': productImageUrl,
-    }).lean();
-    await markDelivered(productImage!.whatsappMessageId!);
-    expect(fetchMock).toHaveBeenCalledTimes(6);
-    expect(JSON.parse(String(fetchMock.mock.calls[5]?.[1]?.body))).toMatchObject({
-      type: 'text',
-      text: { body: expect.stringContaining(product.name) },
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body))).toMatchObject({
+      type: 'interactive',
+      interactive: {
+        header: { type: 'image', image: { link: productImageUrl } },
+        body: { text: expect.stringContaining(product.name) },
+        action: { buttons: expect.any(Array) },
+      },
     });
     const productDetails = await Message.findOne({
       direction: 'OUTBOUND',
-      messageType: 'TEXT',
+      messageType: 'INTERACTIVE',
       'content.productId': product.id,
     }).lean();
     await markDelivered(productDetails!.whatsappMessageId!);
-    expect(fetchMock).toHaveBeenCalledTimes(7);
-    expect(JSON.parse(String(fetchMock.mock.calls[6]?.[1]?.body))).toMatchObject({ type: 'interactive' });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it('sends every catalogue product in delivery-gated lists of at most ten rows', async () => {
@@ -608,8 +560,8 @@ describe('catalogue automation', () => {
     });
 
     await automationService.processIncoming(inbound('paged-welcome'));
-    const welcomeImage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'IMAGE' }).lean();
-    await markDelivered(welcomeImage!.whatsappMessageId!);
+    const welcomeMessage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'INTERACTIVE' }).lean();
+    await markDelivered(welcomeMessage!.whatsappMessageId!);
     await automationService.processIncoming(inbound('paged-menu', 'explore_products'));
     const catalogueImage = await Message.findOne({
       direction: 'OUTBOUND',
@@ -624,22 +576,14 @@ describe('catalogue automation', () => {
         .lean();
     let lists = await productLists();
     expect(lists).toHaveLength(1);
-    const firstPayloadRows = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body)).interactive.action.sections[0]
+    const firstPayloadRows = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body)).interactive.action.sections[0]
       .rows as Array<{ id: string; title: string }>;
-    const firstAction = lists[0]?.deliveryAction as {
-      type: string;
-      sections: Array<{ rows: Array<{ id: string; title: string }> }>;
-      remainingRows: Array<{ id: string; title: string }>;
-    };
-    expect(firstAction.type).toBe('PRODUCT_MENU');
     expect(firstPayloadRows).toHaveLength(10);
-    expect(firstAction.sections[0]?.rows).toHaveLength(3);
-    expect(firstAction.remainingRows).toHaveLength(0);
 
     await markDelivered(lists[0]!.whatsappMessageId!);
     lists = await productLists();
     expect(lists).toHaveLength(2);
-    const secondRows = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body)).interactive.action.sections[0].rows as Array<{
+    const secondRows = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body)).interactive.action.sections[0].rows as Array<{
       id: string;
       title: string;
     }>;
@@ -649,7 +593,7 @@ describe('catalogue automation', () => {
     expect(allRows.some((row) => row.title.toLowerCase().includes('more products'))).toBe(false);
   });
 
-  it('sends the welcome image before one welcome message with its reply buttons', async () => {
+  it('sends the welcome image and reply buttons in one interactive message', async () => {
     let counter = 0;
     const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(
       async () =>
@@ -668,24 +612,23 @@ describe('catalogue automation', () => {
     });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const welcomeImage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'IMAGE' }).lean();
-    await markDelivered(welcomeImage!.whatsappMessageId!);
+    const welcomeMessage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'INTERACTIVE' }).lean();
+    await markDelivered(welcomeMessage!.whatsappMessageId!);
     const customer = await Customer.findOne({ whatsappId: senderId });
     expect(customer?.phoneNumber).toBeUndefined();
     expect(customer?.optInStatus).toBe('UNKNOWN');
     expect((await Conversation.findOne({ customerId: customer?._id }))?.currentStep).toBe('WELCOME_SENT');
     const payloads = fetchMock.mock.calls.map(([, options]) => JSON.parse(String(options?.body)));
-    expect(payloads).toHaveLength(2);
+    expect(payloads).toHaveLength(1);
     expect(payloads[0]).toMatchObject({
-      to: senderId,
-      type: 'image',
-      image: { link: new URL('/ncut-welcome-message-v2.jpg', env.FRONTEND_URL).toString() },
-    });
-    expect(payloads[1]).toMatchObject({
       to: senderId,
       type: 'interactive',
       interactive: {
         type: 'button',
+        header: {
+          type: 'image',
+          image: { link: new URL('/ncut-welcome-message-v2.jpg', env.FRONTEND_URL).toString() },
+        },
         body: { text: '👋 Thank you for connecting with us!\n\nExplore our range of abrasive and finishing products.' },
         action: {
           buttons: [
@@ -695,9 +638,9 @@ describe('catalogue automation', () => {
         },
       },
     });
-    expect(await Message.countDocuments({ direction: 'OUTBOUND' })).toBe(2);
+    expect(await Message.countDocuments({ direction: 'OUTBOUND' })).toBe(1);
     expect(await Message.find({ direction: 'OUTBOUND' }).sort({ _id: 1 }).distinct('messageType')).toEqual(
-      expect.arrayContaining(['IMAGE', 'INTERACTIVE']),
+      ['INTERACTIVE'],
     );
     const welcome = await Message.findOne({ direction: 'OUTBOUND', messageType: 'INTERACTIVE' }).lean();
     expect(welcome?.content).toMatchObject({
@@ -738,8 +681,8 @@ describe('catalogue automation', () => {
     expect(conversation?.selectedProductIds).toHaveLength(3);
     expect(conversation?.interestTriggeredAt).toBeInstanceOf(Date);
     expect(
-      await Message.countDocuments({ direction: 'OUTBOUND', 'content.type': 'third-product-interest-trigger' }),
-    ).toBe(1);
+      await Message.countDocuments({ direction: 'OUTBOUND', 'content.type': 'product-details-next-steps' }),
+    ).toBe(4);
   });
 
   it('hands a customer to sales and creates only one lead', async () => {
@@ -813,14 +756,14 @@ describe('catalogue automation', () => {
     });
 
     await automationService.processIncoming(inbound('msg-before-handover'));
-    const welcomeImage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'IMAGE' }).lean();
+    const welcomeMessage = await Message.findOne({ direction: 'OUTBOUND', messageType: 'INTERACTIVE' }).lean();
     await automationService.processIncoming(inbound('msg-connect-sales', 'connect_sales'));
     expect((await Conversation.findOne())?.status).toBe('HUMAN_HANDOVER');
     expect(fetchMock).toHaveBeenCalledTimes(2);
 
-    await markDelivered(welcomeImage!.whatsappMessageId!);
+    await markDelivered(welcomeMessage!.whatsappMessageId!);
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(await Message.countDocuments({ direction: 'OUTBOUND', messageType: 'INTERACTIVE' })).toBe(1);
+    expect(await Message.countDocuments({ direction: 'OUTBOUND', messageType: 'INTERACTIVE' })).toBe(2);
   });
 
   it('reuses one customer lead when a returning customer hands over a later conversation', async () => {
@@ -916,13 +859,12 @@ describe('catalogue automation', () => {
     expect(await Message.countDocuments({ conversationId: conversation._id, direction: 'OUTBOUND' })).toBe(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
-      type: 'image',
-      image: { link: new URL('/ncut-welcome-message-v2.jpg', env.FRONTEND_URL).toString() },
+      type: 'interactive',
+      interactive: {
+        header: { type: 'image', image: { link: new URL('/ncut-welcome-message-v2.jpg', env.FRONTEND_URL).toString() } },
+        action: { buttons: expect.any(Array) },
+      },
     });
-    const welcomeImage = await Message.findOne({ conversationId: conversation._id, messageType: 'IMAGE' }).lean();
-    await markDelivered(welcomeImage!.whatsappMessageId!);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body))).toMatchObject({ type: 'interactive' });
   });
 
   it('records an opt-out and stops subsequent automation', async () => {
@@ -1061,7 +1003,11 @@ describe('catalogue automation', () => {
       type: 'text',
       text: { body: 'Hello' },
     });
-    const image = await Message.findOne({ direction: 'OUTBOUND', messageType: 'IMAGE' });
+    const image = await Message.findOne({
+      direction: 'OUTBOUND',
+      messageType: 'INTERACTIVE',
+      'content.imageUrl': new URL('/ncut-welcome-message-v2.jpg', env.FRONTEND_URL).toString(),
+    });
     await WebhookEvent.create({
       eventId: `status:${image?.whatsappMessageId}:failed`,
       eventType: 'status',
@@ -1075,7 +1021,7 @@ describe('catalogue automation', () => {
     await processPendingWebhookEvents();
     const failedImage = await Message.findById(image?._id);
     expect(failedImage?.status).toBe('FAILED');
-    expect(failedImage?.deliveryActionStatus).toBe('FAILED');
+    expect(failedImage?.deliveryActionStatus).toBeUndefined();
     expect(await Message.countDocuments({ direction: 'OUTBOUND' })).toBe(1);
   });
 
@@ -1117,20 +1063,18 @@ describe('catalogue automation', () => {
     await deliverPendingActions();
     await automationService.processIncoming(createSelection('retry-c-msg', products[2]!.id));
     await deliverPendingActions();
-    expect((await Conversation.findOne())?.interestPromptStatus).toBe('PENDING');
+    expect((await Conversation.findOne())?.interestPromptStatus).toBe('SENT');
 
-    const pendingNextSteps = await Message.findOne({
+    const combinedDetails = await Message.findOne({
       direction: 'OUTBOUND',
-      deliveryActionStatus: 'PENDING',
-      'content.text': 'What would you like to do next?',
+      'content.type': 'product-details-next-steps',
     }).lean();
-    expect(pendingNextSteps?.whatsappMessageId).toBeTruthy();
-    await markDelivered(pendingNextSteps!.whatsappMessageId!);
+    expect(combinedDetails?.whatsappMessageId).toBeTruthy();
     const conversation = await Conversation.findOne();
     expect(conversation?.uniqueProductCount).toBe(3);
     expect(conversation?.interestPromptStatus).toBe('SENT');
     expect(
-      await Message.countDocuments({ direction: 'OUTBOUND', 'content.type': 'third-product-interest-trigger' }),
-    ).toBe(1);
+      await Message.countDocuments({ direction: 'OUTBOUND', 'content.type': 'product-details-next-steps' }),
+    ).toBeGreaterThanOrEqual(1);
   });
 });

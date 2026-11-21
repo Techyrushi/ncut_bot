@@ -75,7 +75,7 @@ type DeliveryAction =
       content: Record<string, unknown>;
       remainingRows?: InteractiveRow[];
     }
-  | { type: 'PRODUCT_DETAILS'; details: string; productId: string; uniqueProductCount: number }
+  | { type: 'PRODUCT_DETAILS'; details: string; productId: string; uniqueProductCount: number; imageUrl?: string }
   | { type: 'PRODUCT_NEXT_STEPS'; uniqueProductCount: number }
   | { type: 'THIRD_PRODUCT_INTEREST' };
 
@@ -108,7 +108,8 @@ function isDeliveryAction(value: unknown): value is DeliveryAction {
     return (
       typeof record.details === 'string' &&
       typeof record.productId === 'string' &&
-      typeof record.uniqueProductCount === 'number'
+      typeof record.uniqueProductCount === 'number' &&
+      (record.imageUrl === undefined || typeof record.imageUrl === 'string')
     );
   }
   return record.type === 'PRODUCT_NEXT_STEPS'
@@ -348,10 +349,9 @@ export class AutomationService {
     await this.sendTracked(
       customerId,
       conversationId,
-      'IMAGE',
-      { imageUrl: WELCOME_IMAGE_URL },
-      () => whatsappService.sendImage(to, WELCOME_IMAGE_URL),
-      { type: 'WELCOME_OPTIONS', body, buttons },
+      'INTERACTIVE',
+      { text: body, imageUrl: WELCOME_IMAGE_URL, buttons },
+      () => whatsappService.sendImageButtons(to, WELCOME_IMAGE_URL, body, buttons),
     );
     await Conversation.updateOne({ _id: conversationId }, { $set: { currentStep: 'WELCOME_SENT' } });
   }
@@ -431,6 +431,22 @@ export class AutomationService {
       await this.sendProducts(undefined, customerId, conversation._id, to);
       return;
     }
+    if (id === 'main_menu') {
+      await Conversation.updateOne(
+        { _id: conversation._id },
+        {
+          $set: { status: 'OPEN', currentStep: 'NEW', selectedProductIds: [], uniqueProductCount: 0 },
+          $unset: {
+            interestTriggeredAt: 1,
+            interestPromptStatus: 1,
+            interestPromptLockedAt: 1,
+            currentCategory: 1,
+          },
+        },
+      );
+      await this.sendWelcome(customerId, conversation._id, to);
+      return;
+    }
     const body = 'Sorry, I could not match that selection. Please choose an option.';
     await this.sendTracked(customerId, conversation._id, 'INTERACTIVE', { text: body }, () =>
       whatsappService.sendButtons(to, body, [
@@ -493,7 +509,16 @@ export class AutomationService {
       description: shortProductDescription(product.description),
     }));
     const body = firstCatalogueBody(category, products.length);
-    await Conversation.updateOne({ _id: conversationId }, { $set: { currentStep: 'PRODUCT_MENU' } });
+    await Conversation.updateOne(
+      { _id: conversationId },
+      {
+        $set: {
+          currentStep: 'PRODUCT_MENU',
+          ...(category ? { currentCategory: category } : {}),
+        },
+        ...(!category ? { $unset: { currentCategory: 1 } } : {}),
+      },
+    );
     const catalogId = env.WHATSAPP_CATALOG_ID;
     const mappedProducts = products.flatMap((product) => {
       const retailerId = product.whatsappProductRetailerId?.trim();
@@ -525,7 +550,7 @@ export class AutomationService {
       );
       return;
     }
-    if (catalogId) {
+    if (catalogId && !hasCatalogMapping) {
       logger.warn(
         {
           catalogId,
@@ -535,12 +560,8 @@ export class AutomationService {
         'Meta catalog is configured but products are missing retailer IDs or exceed the multi-product limit; using legacy product lists',
       );
     }
-    const sections = [
-      {
-        title: category ? (PRODUCT_CATEGORY_TITLES[category] ?? category).slice(0, 24) : 'Available products',
-        rows: rows.slice(0, 10),
-      },
-    ];
+    const title = category ? (PRODUCT_CATEGORY_TITLES[category] ?? category).slice(0, 24) : 'Available products';
+    const firstRows = rows.slice(0, 10);
     const content = {
       text: body,
       ...(category ? { category } : {}),
@@ -556,7 +577,7 @@ export class AutomationService {
         type: 'PRODUCT_MENU',
         body,
         buttonText: 'View products',
-        sections,
+        sections: [{ title, rows: firstRows }],
         content,
         remainingRows: rows.slice(10),
       },
@@ -611,22 +632,20 @@ export class AutomationService {
     ]
       .filter(Boolean)
       .join('\n\n');
-    const imageUrl = product.imageUrl;
+    const imageUrl = typeof product.imageUrl === 'string' && product.imageUrl.trim()
+      ? product.imageUrl.trim()
+      : undefined;
     const uniqueProductCount =
       updatedConversation?.uniqueProductCount ?? conversation.selectedProductIds.length + Number(update.modifiedCount > 0);
-    if (imageUrl) {
-      await this.sendTracked(
-        customerId,
-        conversation._id,
-        'IMAGE',
-        { imageUrl: product.imageUrl },
-        () => whatsappService.sendImage(to, imageUrl),
-        { type: 'PRODUCT_DETAILS', details, productId: String(product._id), uniqueProductCount },
-      );
-      logger.debug({ productId, uniqueSelection: Boolean(update.modifiedCount) }, 'Product selection processed');
-      return;
-    }
-    await this.sendProductDetails(customerId, conversation._id, to, details, productId, uniqueProductCount);
+    await this.sendProductDetails(
+      customerId,
+      conversation._id,
+      to,
+      details,
+      productId,
+      uniqueProductCount,
+      imageUrl,
+    );
     logger.debug({ productId, uniqueSelection: Boolean(update.modifiedCount) }, 'Product selection processed');
   }
 
@@ -637,14 +656,32 @@ export class AutomationService {
     details: string,
     productId: string,
     uniqueProductCount: number,
+    imageUrl?: string,
   ): Promise<void> {
+    let body = `${details}\n\nWhat would you like to do next?`;
+
+    if (uniqueProductCount >= 3) {
+      await Conversation.updateOne(
+        { _id: conversationId, interestTriggeredAt: { $exists: false } },
+        {
+          $set: { interestTriggeredAt: new Date(), interestPromptStatus: 'SENT', currentStep: 'INTEREST_TRIGGERED' },
+        },
+      );
+      body = `${details}\n\nThank you for exploring our products! Would you like to connect with our sales team?`;
+    }
+
+    const buttons: InteractiveButton[] = [
+      { id: 'another_product', title: 'Explore Another' },
+      { id: 'connect_sales', title: 'Connect With Team' },
+    ];
     await this.sendTracked(
       customerId,
       conversationId,
-      'TEXT',
-      { text: details, productId },
-      () => whatsappService.sendText(to, details),
-      { type: 'PRODUCT_NEXT_STEPS', uniqueProductCount },
+      'INTERACTIVE',
+      { text: body, productId, type: 'product-details-next-steps', ...(imageUrl ? { imageUrl } : {}) },
+      () => imageUrl
+        ? whatsappService.sendImageButtons(to, imageUrl, body, buttons)
+        : whatsappService.sendButtons(to, body, buttons),
     );
   }
 
@@ -851,6 +888,7 @@ export class AutomationService {
           action.details,
           action.productId,
           action.uniqueProductCount,
+          action.imageUrl,
         );
       } else if (action.type === 'PRODUCT_NEXT_STEPS') {
         await this.sendProductNextSteps(

@@ -147,6 +147,29 @@ export class WhatsAppService {
     });
   }
 
+  sendImageButtons(to: string, imageUrl: string, body: string, buttons: InteractiveButton[]): Promise<string> {
+    if (
+      buttons.length < 1 ||
+      buttons.length > 3 ||
+      buttons.some((button) => !button.title.trim() || button.title.length > 20 || button.id.length > 256)
+    ) {
+      throw new ApiError(
+        400,
+        'WhatsApp reply buttons require 1 to 3 items with titles of at most 20 characters',
+        'INVALID_INTERACTIVE_MESSAGE',
+      );
+    }
+    return this.send(to, {
+      type: 'interactive',
+      interactive: {
+        type: 'button',
+        header: { type: 'image', image: { link: imageUrl } },
+        body: { text: body },
+        action: { buttons: buttons.map(({ id, title }) => ({ type: 'reply', reply: { id, title } })) },
+      },
+    });
+  }
+
   sendButtons(to: string, body: string, buttons: InteractiveButton[]): Promise<string> {
     if (
       buttons.length < 1 ||
