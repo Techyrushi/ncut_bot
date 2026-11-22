@@ -239,7 +239,7 @@ export function BulkCampaignsPage() {
   async function retryFailedRecipients(recipientIds: string[]): Promise<void> {
     if (!selectedId || recipientIds.length === 0) return;
     const confirmed = window.confirm(
-      `Queue ${recipientIds.length} failed message${recipientIds.length === 1 ? '' : 's'} for one manual retry? They will use the normal paced queue. Meta can still reject messages due to recipient limits or deliverability, and previously accepted sends will not be retried.`,
+      `Queue ${recipientIds.length} failed message${recipientIds.length === 1 ? '' : 's'} for another manual retry? They will use the normal paced queue, with at most three total send attempts per recipient. Meta can still reject messages due to recipient limits or deliverability, and previously accepted sends will not be retried.`,
     );
     if (!confirmed) return;
 
@@ -767,7 +767,7 @@ export function BulkCampaignsPage() {
                   Clear selection
                 </button>
               </div>
-              <small>Retries are manually queued at the normal pace (one recipient per second). Meta limits and undeliverable numbers are not bypassed; previously accepted sends and recipients that have reached the retry limit are excluded.</small>
+              <small>Retries are manually queued at the normal pace (one recipient per second), with up to three total send attempts per recipient. Meta limits and undeliverable numbers are not bypassed; previously accepted sends and recipients that have reached the retry limit are excluded.</small>
             </div>
           )}
           {detail.isError && <p className="form-error" role="alert">{getErrorMessage(detail.error)}</p>}
@@ -784,7 +784,7 @@ export function BulkCampaignsPage() {
                   const canRecordOptIn = isConsentPendingRecipient(recipient, selectedCampaign.status);
                   const canRetryRecipient = isRetryableFailedRecipient(recipient, selectedCampaign.status);
                   const retryBlockedReason = recipient.status === 'FAILED'
-                    ? Number(recipient.attempts ?? 0) >= 2
+                    ? Number(recipient.attempts ?? 0) >= 3
                       ? 'Retry limit reached'
                       : String(recipient.lastError ?? '').startsWith('WhatsApp accepted the send (')
                         ? 'Verify WhatsApp before retrying'
@@ -880,7 +880,7 @@ function isRetryableFailedRecipient(recipient: CampaignRecord, campaignStatus: u
     campaignStatus === 'COMPLETED' &&
     recipient.status === 'FAILED' &&
     recipient.eligible === true &&
-    Number(recipient.attempts ?? 0) < 2 &&
+    Number(recipient.attempts ?? 0) < 3 &&
     hasRecordedOptIn &&
     !String(recipient.lastError ?? '').startsWith('WhatsApp accepted the send (')
   );

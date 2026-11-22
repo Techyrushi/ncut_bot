@@ -21,7 +21,7 @@ const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
 const MAX_RECIPIENTS = 500;
 const MAX_IMPORT_ROWS = 5000;
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
-const MAX_RECIPIENT_ATTEMPTS = 2;
+const MAX_RECIPIENT_ATTEMPTS = 3;
 const mediaTypes: Record<string, { type: 'IMAGE' | 'VIDEO' | 'DOCUMENT'; mimeType: string }> = {
   '.jpg': { type: 'IMAGE', mimeType: 'image/jpeg' },
   '.jpeg': { type: 'IMAGE', mimeType: 'image/jpeg' },

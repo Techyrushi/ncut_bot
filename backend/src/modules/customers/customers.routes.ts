@@ -22,7 +22,7 @@ type ConsentImportRow = {
   rowNumber: number;
   phoneNumber: string;
   name?: string;
-  consentAt: Date;
+  consentAt?: Date;
   consentSource: string;
 };
 
@@ -105,10 +105,10 @@ async function parseConsentImport(buffer: Buffer, contentType: string | undefine
       columns.source ??= column;
     }
   });
-  if (!columns.phone || !columns.status || !columns.date || !columns.source) {
+  if (!columns.phone || !columns.status || !columns.source) {
     throw new ApiError(
       400,
-      'Required headers: Phone Number, Consent Status, Consent Date, and Consent Source. Customer Name is optional.',
+      'Required headers: Phone Number, Consent Status, and Consent Source. Customer Name and Consent Date are optional.',
       'INVALID_CONSENT_IMPORT_HEADERS',
     );
   }
@@ -121,8 +121,8 @@ async function parseConsentImport(buffer: Buffer, contentType: string | undefine
     const row = sheet.getRow(rowNumber);
     const rawPhone = importCellText(row.getCell(columns.phone));
     const rawStatus = importCellText(row.getCell(columns.status)).toUpperCase().replace(/[\s-]+/g, '_');
-    const rawDateCell = row.getCell(columns.date).value;
-    const rawDate = importCellText(row.getCell(columns.date));
+    const rawDateCell = columns.date ? row.getCell(columns.date).value : undefined;
+    const rawDate = columns.date ? importCellText(row.getCell(columns.date)) : '';
     const consentSource = importCellText(row.getCell(columns.source));
     const name = columns.name ? importCellText(row.getCell(columns.name)) : '';
     if (![rawPhone, rawStatus, rawDate, consentSource, name].some(Boolean)) continue;
@@ -142,13 +142,14 @@ async function parseConsentImport(buffer: Buffer, contentType: string | undefine
     if (name.length > 120) {
       throw new ApiError(400, `Row ${rowNumber}: Customer Name must be at most 120 characters`, 'INVALID_CONSENT_IMPORT_ROW');
     }
-    const consentAt =
-      rawDateCell instanceof Date
-        ? rawDateCell
-        : /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/.test(rawDate)
+    const consentAt = rawDateCell instanceof Date
+      ? rawDateCell
+      : rawDate
+        ? /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?)?$/.test(rawDate)
           ? new Date(rawDate)
-          : new Date(Number.NaN);
-    if (Number.isNaN(consentAt.getTime()) || consentAt.getTime() > Date.now()) {
+          : new Date(Number.NaN)
+        : undefined;
+    if (consentAt && (Number.isNaN(consentAt.getTime()) || consentAt.getTime() > Date.now())) {
       throw new ApiError(400, `Row ${rowNumber}: Consent Date must be a valid ISO date/time that is not in the future`, 'INVALID_CONSENT_IMPORT_ROW');
     }
     if (seenNumbers.has(phoneNumber)) {
@@ -160,7 +161,7 @@ async function parseConsentImport(buffer: Buffer, contentType: string | undefine
       rowNumber,
       phoneNumber,
       ...(name ? { name } : {}),
-      consentAt,
+      ...(consentAt ? { consentAt } : {}),
       consentSource,
     });
   }
@@ -267,19 +268,24 @@ customersRouter.post(
     let created = 0;
     let updated = 0;
     let skippedOptedOut = 0;
+    let skippedAlreadyOptedIn = 0;
+    let skippedAmbiguous = 0;
     for (const row of rows) {
       const matches = byNumber.get(row.phoneNumber) ?? [];
       if (matches.length > 1) {
-        throw new ApiError(409, `Row ${row.rowNumber}: Phone Number matches multiple customer records`, 'AMBIGUOUS_CUSTOMER');
+        skippedAmbiguous += 1;
+        continue;
       }
       const customer = matches[0];
       if (customer?.optInStatus === 'OPTED_OUT') {
         skippedOptedOut += 1;
         continue;
       }
+      if (customer?.optInStatus === 'OPTED_IN') {
+        skippedAlreadyOptedIn += 1;
+        continue;
+      }
       if (customer) {
-        const newerConsentAlreadyRecorded =
-          customer.optInStatus === 'OPTED_IN' && customer.optInAt && customer.optInAt.getTime() > row.consentAt.getTime();
         operations.push({
           updateOne: {
             filter: { _id: customer._id },
@@ -288,14 +294,11 @@ customersRouter.post(
                 phoneNumber: row.phoneNumber,
                 phoneIdentity: normalizePhoneIdentity(row.phoneNumber),
                 ...(row.name ? { name: row.name } : {}),
-                ...(!newerConsentAlreadyRecorded
-                  ? {
-                      optInStatus: 'OPTED_IN',
-                      optInAt: row.consentAt,
-                      optInSource: row.consentSource,
-                    }
-                  : {}),
+                optInStatus: 'OPTED_IN',
+                ...(row.consentAt ? { optInAt: row.consentAt } : {}),
+                optInSource: row.consentSource,
               },
+              ...(!row.consentAt ? { $unset: { optInAt: 1 } } : {}),
             },
           },
         });
@@ -309,7 +312,7 @@ customersRouter.post(
               phoneIdentity: normalizePhoneIdentity(row.phoneNumber),
               ...(row.name ? { name: row.name } : {}),
               optInStatus: 'OPTED_IN',
-              optInAt: row.consentAt,
+              ...(row.consentAt ? { optInAt: row.consentAt } : {}),
               optInSource: row.consentSource,
             },
           },
@@ -322,7 +325,7 @@ customersRouter.post(
     await recordActivity({
       source: 'USER',
       action: 'CUSTOMER_CONSENT_IMPORT',
-      summary: `Imported ${created} new and updated ${updated} customer consent record(s); preserved ${skippedOptedOut} opted-out contact(s)`,
+      summary: `Imported ${created} new and updated ${updated} customer consent record(s); skipped ${skippedAlreadyOptedIn} already opted-in, ${skippedAmbiguous} ambiguous, and preserved ${skippedOptedOut} opted-out contact(s)`,
       resourceType: 'customer',
       actorId: user?.id,
       actorRole: user?.role,
@@ -337,6 +340,8 @@ customersRouter.post(
         updated,
         optedIn: created + updated,
         skippedOptedOut,
+        skippedAlreadyOptedIn,
+        skippedAmbiguous,
       },
     });
   }),

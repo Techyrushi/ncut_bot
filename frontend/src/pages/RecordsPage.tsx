@@ -110,14 +110,17 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
           created: number;
           updated: number;
           skippedOptedOut: number;
+          skippedAlreadyOptedIn: number;
+          skippedAmbiguous: number;
           duplicateRows: number;
         }>
       >('/customers/import', consentImportFile, {
         headers: { 'Content-Type': contentType, 'X-Consent-Verified': 'true' },
       });
-      const { created, updated, skippedOptedOut, duplicateRows } = response.data.data;
+      const { created, updated, skippedOptedOut, skippedAlreadyOptedIn, skippedAmbiguous, duplicateRows } =
+        response.data.data;
       setNotice(
-        `Consent import complete: ${created} new, ${updated} updated, ${skippedOptedOut} opted-out contacts preserved, ${duplicateRows} duplicates skipped.`,
+        `Consent import complete: ${created} new, ${updated} updated, ${skippedAlreadyOptedIn} already opted-in contacts skipped, ${skippedAmbiguous} ambiguous contacts skipped, ${skippedOptedOut} opted-out contacts preserved, ${duplicateRows} duplicate rows skipped.`,
       );
       setConsentImportFile(undefined);
       setConsentImportConfirmed(false);
@@ -205,9 +208,9 @@ export function RecordsPage({ kind, title, eyebrow }: RecordPageProps) {
           <div className="eyebrow">CUSTOMER CONSENT IMPORT</div>
           <h2>Import opted-in contacts</h2>
           <p>
-            Upload a CSV/XLSX with Phone Number, Consent Status, Consent Date, and Consent Source columns.
-            Each row must state OPTED_IN and include the actual consent date and source. Existing opt-outs
-            are preserved and excluded.
+            Upload a CSV/XLSX with Phone Number, Consent Status, and Consent Source columns. Each row must
+            state OPTED_IN and include the actual consent source. Customer Name and Consent Date are optional.
+            Existing opted-in contacts are skipped, and existing opt-outs are preserved and excluded.
           </p>
           <button type="button" className="text-button" onClick={() => void downloadConsentSample()}>
             Download Excel sample

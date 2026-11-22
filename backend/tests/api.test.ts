@@ -802,12 +802,22 @@ it('imports contacts with explicit consent evidence and preserves existing opt-o
     phoneNumber: '918888888888',
     optInStatus: 'OPTED_OUT',
   });
+  const alreadyOptedIn = await Customer.create({
+    whatsappId: '919999999991',
+    phoneNumber: '919999999991',
+    name: 'Existing Contact',
+    optInStatus: 'OPTED_IN',
+    optInAt: new Date('2024-01-15'),
+    optInSource: 'Previous signup',
+  });
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet('Consented Contacts');
   sheet.addRow(['Phone Number', 'Customer Name', 'Consent Status', 'Consent Date', 'Consent Source']);
   sheet.addRow(['917000000001', 'New Contact', 'OPTED_IN', '2025-11-20', 'Website signup']);
   sheet.addRow(['7000000001', 'Duplicate Contact', 'OPTED_IN', '2025-11-20', 'Website signup']);
   sheet.addRow(['918888888888', 'Opted Out Contact', 'OPTED_IN', '2025-11-20', 'Website signup']);
+  sheet.addRow(['919999999991', 'Updated Name', 'OPTED_IN', '2025-11-20', 'New source']);
+  sheet.addRow(['917000000002', '', 'OPTED_IN', '', 'Website signup']);
   const xlsx = Buffer.from(await workbook.xlsx.writeBuffer());
   const imported = await request(app)
     .post('/api/v1/customers/import')
@@ -818,13 +828,14 @@ it('imports contacts with explicit consent evidence and preserves existing opt-o
 
   expect(imported.status).toBe(200);
   expect(imported.body.data).toMatchObject({
-    rows: 3,
-    uniqueContacts: 2,
+    rows: 5,
+    uniqueContacts: 4,
     duplicateRows: 1,
-    created: 1,
+    created: 2,
     updated: 0,
-    optedIn: 1,
+    optedIn: 2,
     skippedOptedOut: 1,
+    skippedAlreadyOptedIn: 1,
   });
   const importedCustomer = await Customer.findOne({ phoneNumber: '917000000001' });
   expect(importedCustomer).toMatchObject({
@@ -835,6 +846,79 @@ it('imports contacts with explicit consent evidence and preserves existing opt-o
   });
   expect(importedCustomer?.optInAt).toEqual(new Date('2025-11-20'));
   expect((await Customer.findById(optedOut._id))?.optInStatus).toBe('OPTED_OUT');
+  const existingOptedIn = await Customer.findById(alreadyOptedIn._id);
+  expect(existingOptedIn).toMatchObject({
+    name: 'Existing Contact',
+    optInStatus: 'OPTED_IN',
+    optInAt: new Date('2024-01-15'),
+    optInSource: 'Previous signup',
+  });
+  const importedWithoutOptionalFields = await Customer.findOne({ phoneNumber: '917000000002' });
+  expect(importedWithoutOptionalFields?.name).toBeUndefined();
+  expect(importedWithoutOptionalFields?.optInAt).toBeUndefined();
+});
+
+it('allows customer consent imports without Customer Name or Consent Date columns', async () => {
+  const admin = await User.create({
+    email: 'admin@example.com',
+    name: 'Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const token = jwt.sign({ role: admin.role, ver: admin.authVersion ?? 0 }, env.JWT_SECRET, {
+    subject: admin.id,
+    jwtid: randomUUID(),
+    expiresIn: '1h',
+  });
+  const csv = Buffer.from(
+    'Phone Number,Consent Status,Consent Source\r\n917000000003,OPTED_IN,Website signup\r\n',
+  );
+  const imported = await request(app)
+    .post('/api/v1/customers/import')
+    .set('authorization', `Bearer ${token}`)
+    .set('content-type', 'text/csv')
+    .set('x-consent-verified', 'true')
+    .send(csv);
+
+  expect(imported.status).toBe(200);
+  expect(imported.body.data).toMatchObject({ created: 1, optedIn: 1 });
+  const customer = await Customer.findOne({ phoneNumber: '917000000003' });
+  expect(customer?.optInStatus).toBe('OPTED_IN');
+  expect(customer?.optInAt).toBeUndefined();
+  expect(customer?.name).toBeUndefined();
+});
+
+it('skips ambiguous customer numbers without aborting the import or changing matching records', async () => {
+  const admin = await User.create({
+    email: 'admin@example.com',
+    name: 'Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const token = jwt.sign({ role: admin.role, ver: admin.authVersion ?? 0 }, env.JWT_SECRET, {
+    subject: admin.id,
+    jwtid: randomUUID(),
+    expiresIn: '1h',
+  });
+  const [firstMatch, secondMatch] = await Customer.create([
+    { whatsappId: '917000000004', optInStatus: 'OPTED_IN', name: 'First match' },
+    { whatsappId: '+917000000004', phoneNumber: '+917000000004', optInStatus: 'UNKNOWN', name: 'Second match' },
+  ]);
+  const csv = Buffer.from(
+    'Phone Number,Consent Status,Consent Source\r\n917000000005,OPTED_IN,Verified\r\n917000000004,OPTED_IN,Verified\r\n',
+  );
+  const imported = await request(app)
+    .post('/api/v1/customers/import')
+    .set('authorization', `Bearer ${token}`)
+    .set('content-type', 'text/csv')
+    .set('x-consent-verified', 'true')
+    .send(csv);
+
+  expect(imported.status).toBe(200);
+  expect(imported.body.data).toMatchObject({ created: 1, skippedAmbiguous: 1 });
+  expect((await Customer.findById(firstMatch!._id))?.optInStatus).toBe('OPTED_IN');
+  expect((await Customer.findById(secondMatch!._id))?.optInStatus).toBe('UNKNOWN');
+  expect(await Customer.findOne({ phoneNumber: '917000000005' })).not.toBeNull();
 });
 
 it('requires explicit consent confirmation and valid consent evidence before customer import', async () => {
@@ -850,7 +934,7 @@ it('requires explicit consent confirmation and valid consent evidence before cus
     expiresIn: '1h',
   });
   const csv = Buffer.from(
-    'Phone Number,Consent Status,Consent Date,Consent Source\r\n917000000002,OPTED_IN,,Website signup\r\n',
+    'Phone Number,Consent Status,Consent Date,Consent Source\r\n917000000002,OPTED_IN,,\r\n',
   );
   const unconfirmed = await request(app)
     .post('/api/v1/customers/import')
@@ -1299,7 +1383,7 @@ it('records verified opt-in for selected unknown recipients and keeps opted-out 
   expect(sendTemplate).toHaveBeenCalledWith('919100000002', template.name, template.languageCode, []);
 });
 
-it('queues selected failed campaign recipients for one paced retry only when still opted in', async () => {
+it('queues selected failed campaign recipients for up to three paced attempts only when still opted in', async () => {
   const admin = await User.create({
     email: 'admin@example.com',
     name: 'Admin',
@@ -1329,7 +1413,7 @@ it('queues selected failed campaign recipients for one paced retry only when sti
     status: 'COMPLETED',
     eligibleRecipients: 4,
   });
-  const [retryable, acceptedUnknown, optedOutRecipient, exhausted, alreadySent] =
+  const [retryable, acceptedUnknown, optedOutRecipient, exhausted, retryableAgain, alreadySent] =
     await BulkCampaignRecipient.create([
       {
         campaignId: campaign._id,
@@ -1372,6 +1456,17 @@ it('queues selected failed campaign recipients for one paced retry only when sti
         sourceRow: 5,
         eligible: true,
         status: 'FAILED',
+        attempts: 3,
+        lastError: 'Message not delivered',
+      },
+      {
+        campaignId: campaign._id,
+        recipientKey: '919100000016',
+        phoneNumber: '919100000016',
+        customerId: optedIn!._id,
+        sourceRow: 6,
+        eligible: true,
+        status: 'FAILED',
         attempts: 2,
         lastError: 'Message not delivered',
       },
@@ -1380,7 +1475,7 @@ it('queues selected failed campaign recipients for one paced retry only when sti
         recipientKey: '919100000015',
         phoneNumber: '919100000015',
         customerId: optedIn!._id,
-        sourceRow: 6,
+        sourceRow: 7,
         eligible: true,
         status: 'SENT',
         attempts: 1,
@@ -1397,25 +1492,39 @@ it('queues selected failed campaign recipients for one paced retry only when sti
     .post(`/api/v1/bulk-campaigns/${campaign._id}/recipients/retry-failed`)
     .set('authorization', `Bearer ${token}`)
     .send({
-      recipientIds: [retryable!._id, acceptedUnknown!._id, optedOutRecipient!._id, exhausted!._id, alreadySent!._id],
+      recipientIds: [
+        retryable!._id,
+        acceptedUnknown!._id,
+        optedOutRecipient!._id,
+        exhausted!._id,
+        retryableAgain!._id,
+        alreadySent!._id,
+      ],
       confirmed: true,
     });
   expect(response.status).toBe(202);
-  expect(response.body.data).toMatchObject({ requested: 5, queued: 1, skipped: 4 });
+  expect(response.body.data).toMatchObject({ requested: 6, queued: 2, skipped: 4 });
   expect((await BulkCampaign.findById(campaign._id))?.status).toBe('QUEUED');
-  expect((await BulkCampaign.findById(campaign._id))?.eligibleRecipients).toBe(1);
+  expect((await BulkCampaign.findById(campaign._id))?.eligibleRecipients).toBe(2);
   expect((await BulkCampaignRecipient.findById(retryable!._id))?.status).toBe('QUEUED');
+  expect((await BulkCampaignRecipient.findById(retryableAgain!._id))?.status).toBe('QUEUED');
   expect((await BulkCampaignRecipient.findById(acceptedUnknown!._id))?.status).toBe('FAILED');
   expect((await BulkCampaignRecipient.findById(optedOutRecipient!._id))?.status).toBe('FAILED');
   expect((await BulkCampaignRecipient.findById(exhausted!._id))?.status).toBe('FAILED');
   expect((await BulkCampaignRecipient.findById(alreadySent!._id))?.status).toBe('SENT');
 
-  const sendTemplate = jest.spyOn(whatsappService, 'sendTemplate').mockResolvedValueOnce('wamid.manual-retry');
+  const sendTemplate = jest
+    .spyOn(whatsappService, 'sendTemplate')
+    .mockResolvedValueOnce('wamid.manual-retry')
+    .mockResolvedValueOnce('wamid.manual-retry-again');
   await processBulkCampaignQueue();
-  expect(sendTemplate).toHaveBeenCalledTimes(1);
+  await processBulkCampaignQueue();
+  expect(sendTemplate).toHaveBeenCalledTimes(2);
   expect(sendTemplate).toHaveBeenCalledWith('919100000011', template.name, template.languageCode, []);
   expect((await BulkCampaignRecipient.findById(retryable!._id))?.status).toBe('SENT');
   expect((await BulkCampaignRecipient.findById(retryable!._id))?.attempts).toBe(2);
+  expect((await BulkCampaignRecipient.findById(retryableAgain!._id))?.status).toBe('SENT');
+  expect((await BulkCampaignRecipient.findById(retryableAgain!._id))?.attempts).toBe(3);
 });
 
 it('imports XLSX recipients and refuses to queue a campaign with no eligible customers', async () => {
