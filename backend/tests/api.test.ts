@@ -363,6 +363,113 @@ it('shows one customer thread with history and unread messages from prior conver
   expect(read.body.data.readCount).toBe(2);
 });
 
+it('requires explicit consent before starting a WhatsApp conversation', async () => {
+  await User.create({
+    email: 'admin@example.com',
+    name: 'Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const login = await request(app).post('/api/v1/auth/login').send({
+    email: 'admin@example.com',
+    password: 'long-test-password',
+  });
+  const token = login.body.data.token as string;
+  const response = await request(app)
+    .post('/api/v1/conversations/start')
+    .set('authorization', `Bearer ${token}`)
+    .send({
+      phoneNumber: '9876543210',
+      consentSource: 'Website form',
+      consentConfirmed: false,
+    });
+
+  expect(response.status).toBe(400);
+  expect(await Customer.countDocuments()).toBe(0);
+  expect(await Conversation.countDocuments()).toBe(0);
+});
+
+it('normalizes and starts a conversation only after recording explicit opt-in', async () => {
+  await User.create({
+    email: 'admin@example.com',
+    name: 'Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const login = await request(app).post('/api/v1/auth/login').send({
+    email: 'admin@example.com',
+    password: 'long-test-password',
+  });
+  const token = login.body.data.token as string;
+  const consent = {
+    phoneNumber: '+91 98765 43210',
+    name: 'New customer',
+    consentSource: 'Website enquiry form, 26 Nov 2026',
+    consentConfirmed: true,
+  };
+  const first = await request(app)
+    .post('/api/v1/conversations/start')
+    .set('authorization', `Bearer ${token}`)
+    .send(consent);
+
+  expect(first.status).toBe(201);
+  const customer = await Customer.findById(first.body.data.customerId);
+  expect(customer).toMatchObject({
+    phoneNumber: '919876543210',
+    whatsappId: '919876543210',
+    optInStatus: 'OPTED_IN',
+    optInSource: consent.consentSource,
+  });
+  expect(await Message.countDocuments({ customerId: customer?._id, direction: 'INBOUND' })).toBe(0);
+
+  const second = await request(app)
+    .post('/api/v1/conversations/start')
+    .set('authorization', `Bearer ${token}`)
+    .send({ ...consent, consentSource: 'Updated website source' });
+  expect(second.status).toBe(201);
+  expect(second.body.data).toMatchObject({
+    conversationId: first.body.data.conversationId,
+    customerId: first.body.data.customerId,
+  });
+  expect((await Customer.findById(customer?._id))?.optInSource).toBe(consent.consentSource);
+  expect(await Conversation.countDocuments()).toBe(1);
+});
+
+it('does not reopen a WhatsApp chat for an opted-out customer', async () => {
+  await User.create({
+    email: 'admin@example.com',
+    name: 'Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const login = await request(app).post('/api/v1/auth/login').send({
+    email: 'admin@example.com',
+    password: 'long-test-password',
+  });
+  const token = login.body.data.token as string;
+  await Customer.create({
+    name: 'Opted out',
+    phoneNumber: '919876543210',
+    whatsappId: '919876543210',
+    optInStatus: 'OPTED_OUT',
+    optInSource: 'Customer request',
+  });
+
+  const response = await request(app)
+    .post('/api/v1/conversations/start')
+    .set('authorization', `Bearer ${token}`)
+    .send({
+      phoneNumber: '9876543210',
+      consentSource: 'Website enquiry form',
+      consentConfirmed: true,
+    });
+
+  expect(response.status).toBe(409);
+  expect(response.body.error.code).toBe('CUSTOMER_OPTED_OUT');
+  expect((await Customer.findOne({ whatsappId: '919876543210' }))?.optInStatus).toBe('OPTED_OUT');
+  expect(await Conversation.countDocuments()).toBe(0);
+});
+
 it('resumes automation from sales handover and resets product-flow state', async () => {
   await User.create({
     email: 'admin@example.com',
@@ -1042,7 +1149,7 @@ it('previews bulk recipients with deduplication, consent and service-window safe
   await Conversation.create({
     customerId: customer._id,
     status: 'OPEN',
-    lastInteractionAt: new Date(),
+    lastInboundMessageAt: new Date(),
   });
   const optedOut = await Customer.create({
     whatsappId: '918888888888',
@@ -1055,8 +1162,8 @@ it('previews bulk recipients with deduplication, consent and service-window safe
     optInStatus: 'OPTED_IN',
   });
   await Conversation.create([
-    { customerId: optedOut._id, status: 'OPEN', lastInteractionAt: new Date() },
-    { customerId: expired._id, status: 'OPEN', lastInteractionAt: new Date(Date.now() - 25 * 60 * 60 * 1000) },
+    { customerId: optedOut._id, status: 'OPEN', lastInboundMessageAt: new Date() },
+    { customerId: expired._id, status: 'OPEN', lastInboundMessageAt: new Date(Date.now() - 25 * 60 * 60 * 1000) },
   ]);
 
   const created = await request(app)
@@ -1150,6 +1257,7 @@ it('sends an approved Meta template bulk campaign outside the 24-hour window', a
     passwordHash: await hash('long-test-password', 4),
     role: 'ADMIN',
   });
+
   const token = jwt.sign({ role: admin.role, ver: admin.authVersion ?? 0 }, env.JWT_SECRET, {
     subject: admin.id,
     jwtid: randomUUID(),
@@ -1213,6 +1321,60 @@ it('sends an approved Meta template bulk campaign outside the 24-hour window', a
     },
   });
   expect(await Conversation.countDocuments({ customerId: customer._id, status: 'OPEN' })).toBe(1);
+});
+
+it('lets admins edit approved template defaults and sends the saved defaults when none are supplied', async () => {
+  const admin = await User.create({
+    email: 'template-admin@example.com',
+    name: 'Template Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const token = jwt.sign({ role: admin.role, ver: admin.authVersion ?? 0 }, env.JWT_SECRET, {
+    subject: admin.id,
+    jwtid: randomUUID(),
+    expiresIn: '1h',
+  });
+  const customer = await Customer.create({
+    whatsappId: '15551110001',
+    phoneNumber: '15551110001',
+    optInStatus: 'OPTED_IN',
+  });
+  await Conversation.create({
+    customerId: customer._id,
+    status: 'OPEN',
+    lastInboundMessageAt: new Date(),
+  });
+  const template = await MessageTemplate.create({
+    name: 'admin_editable_utility',
+    metaTemplateId: '1833828390983633',
+    languageCode: 'en_US',
+    category: 'UTILITY',
+    metaStatus: 'APPROVED',
+  });
+  const defaults = [{ type: 'body', parameters: [{ type: 'text', text: 'Updated default' }] }];
+  const edited = await request(app)
+    .patch(`/api/v1/templates/${template.id}/default-send-components`)
+    .set('authorization', `Bearer ${token}`)
+    .send({ defaultSendComponents: defaults });
+  expect(edited.status).toBe(200);
+  expect(edited.body.data.defaultSendComponents).toEqual(defaults);
+
+  const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
+    new Response(JSON.stringify({ messages: [{ id: 'wamid.admin-template-default' }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  );
+  const sent = await request(app)
+    .post('/api/v1/whatsapp/send-template')
+    .set('authorization', `Bearer ${token}`)
+    .send({ customerId: customer.id, templateId: template.id });
+  expect(sent.status).toBe(201);
+  expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+    type: 'template',
+    template: { name: template.name, components: defaults },
+  });
 });
 
 it('records verified opt-in for an unknown campaign recipient and queues the approved template', async () => {
@@ -1603,7 +1765,7 @@ it('rechecks opt-in immediately before delivery and leaves a newly opted-out con
     whatsappId: '919175731330',
     optInStatus: 'OPTED_IN',
   });
-  await Conversation.create({ customerId: customer._id, status: 'OPEN', lastInteractionAt: new Date() });
+  await Conversation.create({ customerId: customer._id, status: 'OPEN', lastInboundMessageAt: new Date() });
   const created = await request(app)
     .post('/api/v1/bulk-campaigns')
     .set('authorization', `Bearer ${token}`)

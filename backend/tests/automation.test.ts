@@ -159,7 +159,7 @@ describe('WhatsApp webhook', () => {
 describe('Meta Cloud API service', () => {
   it('sends supported message payloads and returns Meta message identifiers', async () => {
     const customer = await Customer.create({ whatsappId: '15551112222', phoneNumber: '15551112222' });
-    await Conversation.create({ customerId: customer._id, status: 'OPEN', lastInteractionAt: new Date() });
+    await Conversation.create({ customerId: customer._id, status: 'OPEN', lastInboundMessageAt: new Date() });
     let counter = 0;
     const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(
       async () =>
@@ -195,7 +195,7 @@ describe('Meta Cloud API service', () => {
 
   it('surfaces Meta API failures rather than returning a fake success', async () => {
     const customer = await Customer.create({ whatsappId: '15551112222', phoneNumber: '15551112222' });
-    await Conversation.create({ customerId: customer._id, status: 'OPEN', lastInteractionAt: new Date() });
+    await Conversation.create({ customerId: customer._id, status: 'OPEN', lastInboundMessageAt: new Date() });
     jest.spyOn(global, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ error: { message: 'Invalid access token', code: 190 } }), {
         status: 400,
@@ -209,7 +209,7 @@ describe('Meta Cloud API service', () => {
 
   it('includes Meta error 131026 details for undeliverable bulk recipients', async () => {
     const customer = await Customer.create({ whatsappId: '15551112222', phoneNumber: '15551112222' });
-    await Conversation.create({ customerId: customer._id, status: 'OPEN', lastInteractionAt: new Date() });
+    await Conversation.create({ customerId: customer._id, status: 'OPEN', lastInboundMessageAt: new Date() });
     jest.spyOn(global, 'fetch').mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -229,6 +229,23 @@ describe('Meta Cloud API service', () => {
         'Meta error 131026: Message undeliverable Message Undeliverable.',
       ),
     });
+
+  });
+
+  it('maps Meta error 131047 to the expired service-window response', async () => {
+    const customer = await Customer.create({ whatsappId: '15551112222', phoneNumber: '15551112222' });
+    await Conversation.create({ customerId: customer._id, status: 'OPEN', lastInboundMessageAt: new Date() });
+    jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { message: 'Re-engagement message', code: 131047 } }),
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    await expect(whatsappService.sendText('15551112222', 'Hello')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'SERVICE_WINDOW_EXPIRED',
+      message: expect.stringContaining('approved WhatsApp template'),
+    });
   });
 
   it('blocks free-form sends outside the customer service window', async () => {
@@ -236,7 +253,7 @@ describe('Meta Cloud API service', () => {
     await Conversation.create({
       customerId: customer._id,
       status: 'OPEN',
-      lastInteractionAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      lastInboundMessageAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
     });
     const fetchMock = jest.spyOn(global, 'fetch');
     await expect(whatsappService.sendText('15551112222', 'Hello')).rejects.toMatchObject({
@@ -246,9 +263,34 @@ describe('Meta Cloud API service', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('checks all customer records sharing a phone when finding the active service window', async () => {
+    const phone = '15551112224';
+    const legacyCustomer = await Customer.create({ whatsappId: 'legacy-user-id', phoneNumber: phone });
+    const currentCustomer = await Customer.create({ whatsappId: 'business-scoped-user-id', phoneNumber: phone });
+    await Conversation.create({
+      customerId: legacyCustomer._id,
+      status: 'OPEN',
+      lastInboundMessageAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+    });
+    await Conversation.create({
+      customerId: currentCustomer._id,
+      status: 'OPEN',
+      lastInboundMessageAt: new Date(),
+    });
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ messages: [{ id: 'wamid.duplicate-identity' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    await expect(whatsappService.sendText(phone, 'Hello')).resolves.toBe('wamid.duplicate-identity');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('sends a native Meta product-list message with catalog retailer IDs', async () => {
     const customer = await Customer.create({ whatsappId: '15551112223', phoneNumber: '15551112223' });
-    await Conversation.create({ customerId: customer._id, status: 'OPEN', lastInteractionAt: new Date() });
+    await Conversation.create({ customerId: customer._id, status: 'OPEN', lastInboundMessageAt: new Date() });
     const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
       new Response(JSON.stringify({ messages: [{ id: 'wamid.product-list' }] }), {
         status: 200,
@@ -856,6 +898,7 @@ describe('catalogue automation', () => {
       description: 'Verified product description',
       category: 'Flap Disc',
     });
+
     const previousActivity = new Date(Date.now() - 2 * 60 * 60 * 1000);
     const conversation = await Conversation.create({
       customerId: customer._id,
@@ -869,6 +912,7 @@ describe('catalogue automation', () => {
       lastMessageAt: previousActivity,
       lastInteractionAt: previousActivity,
     });
+
     let counter = 0;
     const fetchMock = jest.spyOn(global, 'fetch').mockImplementation(async () => {
       return new Response(JSON.stringify({ messages: [{ id: `wamid.handover.restart.${++counter}` }] }), {
@@ -906,6 +950,104 @@ describe('catalogue automation', () => {
         action: { buttons: expect.any(Array) },
       },
     });
+  });
+
+  it('updates the existing new-chat customer identity when a reply arrives and consolidates duplicates', async () => {
+    fakeMetaSend();
+    const phone = '918329618662';
+    const startedCustomer = await Customer.create({
+      whatsappId: phone,
+      phoneNumber: phone,
+      optInStatus: 'OPTED_IN',
+      optInAt: new Date(),
+      optInSource: 'Verified website opt-in',
+    });
+    const startedConversation = await Conversation.create({
+      customerId: startedCustomer._id,
+      status: 'OPEN',
+      currentStep: 'NEW',
+    });
+    const templateMessage = await Message.create({
+      customerId: startedCustomer._id,
+      conversationId: startedConversation._id,
+      whatsappMessageId: 'wamid.new-chat-template',
+      direction: 'OUTBOUND',
+      messageType: 'TEMPLATE',
+      content: { templateName: 'approved_welcome' },
+      status: 'SENT',
+      timestamp: new Date(Date.now() - 60_000),
+    });
+    const duplicateCustomer = await Customer.create({
+      whatsappId: 'US.old-user-id',
+      phoneNumber: phone,
+      optInStatus: 'UNKNOWN',
+    });
+    const duplicateConversation = await Conversation.create({
+      customerId: duplicateCustomer._id,
+      status: 'OPEN',
+      currentStep: 'NEW',
+    });
+    const previousInbound = await Message.create({
+      customerId: duplicateCustomer._id,
+      conversationId: duplicateConversation._id,
+      whatsappMessageId: 'wamid.duplicate-inbound',
+      direction: 'INBOUND',
+      messageType: 'TEXT',
+      content: { text: 'Previous reply' },
+      status: 'RECEIVED',
+      timestamp: new Date(Date.now() - 30_000),
+    });
+
+    await automationService.processIncoming({
+      id: 'wamid.reply-after-template',
+      from: phone,
+      from_user_id: 'US.new-user-id',
+      timestamp: String(Math.floor(Date.now() / 1000)),
+      type: 'text',
+      text: { body: 'Yes, I am interested' },
+    });
+
+    const customers = await Customer.find({});
+    expect(customers).toHaveLength(1);
+    expect(customers[0]).toMatchObject({
+      whatsappId: 'US.new-user-id',
+      phoneNumber: phone,
+      optInStatus: 'OPTED_IN',
+      optInSource: 'Verified website opt-in',
+    });
+    expect((await Customer.findById(startedCustomer._id))?.id).toBe(startedCustomer.id);
+    expect((await Message.findById(templateMessage._id))?.customerId.toString()).toBe(startedCustomer.id);
+    expect((await Message.findById(previousInbound._id))?.customerId.toString()).toBe(startedCustomer.id);
+    expect((await Conversation.findById(duplicateConversation._id))?.customerId.toString()).toBe(startedCustomer.id);
+    expect((await Conversation.findById(duplicateConversation._id))?.status).toBe('CLOSED');
+    expect(await Message.countDocuments({ whatsappMessageId: 'wamid.reply-after-template', customerId: startedCustomer._id })).toBe(1);
+  });
+
+  it('keeps the newest inbound timestamp when webhooks arrive out of order', async () => {
+    fakeMetaSend();
+    const customer = await Customer.create({ whatsappId: '15550003336', phoneNumber: '15550003336' });
+    const conversation = await Conversation.create({
+      customerId: customer._id,
+      status: 'HUMAN_HANDOVER',
+      currentStep: 'HUMAN_HANDOVER',
+    });
+    const newest = new Date(Date.now() - 15 * 60 * 60 * 1000);
+    const older = new Date(Date.now() - 25 * 60 * 60 * 1000);
+    const inbound = (id: string, timestamp: Date) => ({
+      id,
+      from: customer.whatsappId,
+      timestamp: String(Math.floor(timestamp.getTime() / 1000)),
+      type: 'text',
+      text: { body: 'Checking in' },
+    });
+
+    await automationService.processIncoming(inbound('msg-newer', newest));
+    await automationService.processIncoming(inbound('msg-older', older));
+
+    const updated = await Conversation.findById(conversation._id);
+    expect(updated?.lastInboundMessageAt).toEqual(new Date(Math.floor(newest.getTime() / 1000) * 1000));
+    expect(updated?.lastInteractionAt).toEqual(new Date(Math.floor(newest.getTime() / 1000) * 1000));
+    expect(await Message.countDocuments({ conversationId: conversation._id, direction: 'INBOUND' })).toBe(2);
   });
 
   it('records an opt-out and stops subsequent automation', async () => {

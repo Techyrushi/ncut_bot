@@ -12,6 +12,7 @@ import { authenticate, requireRoles, type AuthenticatedRequest } from '../../mid
 import { asyncHandler } from '../../utils/async-handler';
 import { ApiError } from '../../utils/api-error';
 import { recordActivity } from '../logs/activity-log';
+import { normalizePhoneNumber, phoneNumberCandidates } from './phone-number';
 
 export const customersRouter = Router();
 const MAX_CONSENT_IMPORT_BYTES = 5 * 1024 * 1024;
@@ -40,26 +41,6 @@ function importCellText(cell: ExcelJS.Cell): string {
   if ('richText' in value) return value.richText.map((item) => item.text).join('').trim();
   if ('text' in value && typeof value.text === 'string') return value.text.trim();
   return '';
-}
-
-function normalizeImportedPhone(raw: string): string | undefined {
-  let digits = raw.trim().replace(/\D/g, '');
-  if (digits.startsWith('00')) digits = digits.slice(2);
-  if (digits.length === 10) digits = `91${digits}`;
-  else if (digits.length === 11 && digits.startsWith('0')) digits = `91${digits.slice(1)}`;
-  if (digits.length < 11 || digits.length > 15 || digits.startsWith('0')) return undefined;
-  return digits;
-}
-
-function phoneCandidates(phoneNumber: string): string[] {
-  const candidates = new Set([phoneNumber, `+${phoneNumber}`]);
-  if (phoneNumber.startsWith('91')) {
-    const localNumber = phoneNumber.slice(2);
-    candidates.add(localNumber);
-    candidates.add(`+${localNumber}`);
-    candidates.add(`0${localNumber}`);
-  }
-  return [...candidates];
 }
 
 async function parseConsentImport(buffer: Buffer, contentType: string | undefined): Promise<ParsedConsentImport> {
@@ -131,7 +112,7 @@ async function parseConsentImport(buffer: Buffer, contentType: string | undefine
       throw new ApiError(413, `A consent spreadsheet may contain at most ${MAX_CONSENT_IMPORT_ROWS} contacts`, 'IMPORT_TOO_LARGE');
     }
     if (!rawPhone) throw new ApiError(400, `Row ${rowNumber}: Phone Number is required`, 'INVALID_CONSENT_IMPORT_ROW');
-    const phoneNumber = normalizeImportedPhone(rawPhone);
+    const phoneNumber = normalizePhoneNumber(rawPhone);
     if (!phoneNumber) throw new ApiError(400, `Row ${rowNumber}: Phone Number is invalid`, 'INVALID_CONSENT_IMPORT_ROW');
     if (rawStatus !== 'OPTED_IN') {
       throw new ApiError(400, `Row ${rowNumber}: Consent Status must be OPTED_IN`, 'INVALID_CONSENT_IMPORT_ROW');
@@ -244,7 +225,7 @@ customersRouter.post(
     if (!Buffer.isBuffer(req.body)) throw new ApiError(400, 'Upload a consent spreadsheet', 'EMPTY_IMPORT');
     const contentType = req.header('content-type')?.split(';')[0]?.trim();
     const { rows, inputRows, duplicateRows } = await parseConsentImport(req.body, contentType);
-    const candidates = [...new Set(rows.flatMap((row) => phoneCandidates(row.phoneNumber)))];
+    const candidates = [...new Set(rows.flatMap((row) => phoneNumberCandidates(row.phoneNumber)))];
     const existing = await Customer.find({
       $or: [{ whatsappId: { $in: candidates } }, { phoneNumber: { $in: candidates } }],
     })
@@ -253,8 +234,8 @@ customersRouter.post(
     const byNumber = new Map<string, typeof existing>();
     for (const customer of existing) {
       const keys = new Set([
-        normalizeImportedPhone(customer.whatsappId),
-        normalizeImportedPhone(customer.phoneNumber ?? ''),
+        normalizePhoneNumber(customer.whatsappId),
+        normalizePhoneNumber(customer.phoneNumber ?? ''),
       ]);
       for (const key of keys) {
         if (!key) continue;

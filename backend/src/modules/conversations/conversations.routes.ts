@@ -2,13 +2,123 @@ import { Router } from 'express';
 import { Types } from 'mongoose';
 import { z } from 'zod';
 import { Conversation } from '../../database/models/conversation.model';
+import { Customer, normalizePhoneIdentity } from '../../database/models/customer.model';
 import { Message } from '../../database/models/message.model';
-import { authenticate, requireRoles } from '../../middleware/auth';
+import { authenticate, requireRoles, type AuthenticatedRequest } from '../../middleware/auth';
 import { asyncHandler } from '../../utils/async-handler';
 import { ApiError } from '../../utils/api-error';
 import { whatsappService } from '../whatsapp/whatsapp.service';
+import { recordActivity } from '../logs/activity-log';
+import { normalizePhoneNumber, phoneNumberCandidates } from '../customers/phone-number';
 
 export const conversationsRouter = Router();
+
+conversationsRouter.post(
+  '/start',
+  authenticate,
+  requireRoles('ADMIN', 'SALES'),
+  asyncHandler(async (req, res) => {
+    const input = z
+      .object({
+        phoneNumber: z.string().trim().min(1).max(40),
+        name: z.string().trim().max(120).optional(),
+        consentSource: z.string().trim().min(1).max(500),
+        consentConfirmed: z.literal(true),
+      })
+      .parse(req.body);
+    const phoneNumber = normalizePhoneNumber(input.phoneNumber);
+    if (!phoneNumber) throw new ApiError(400, 'Enter a valid number with country code', 'INVALID_PHONE_NUMBER');
+
+    const candidates = phoneNumberCandidates(phoneNumber);
+    const matches = await Customer.find({
+      $or: [
+        { phoneIdentity: phoneNumber },
+        { phoneNumber: { $in: candidates } },
+        { whatsappId: { $in: candidates } },
+      ],
+    })
+      .select('_id phoneNumber whatsappId optInStatus')
+      .lean();
+    if (matches.some((customer) => customer.optInStatus === 'OPTED_OUT')) {
+      throw new ApiError(
+        409,
+        'This customer has opted out. Update their consent record only after receiving a new explicit opt-in.',
+        'CUSTOMER_OPTED_OUT',
+      );
+    }
+    const activeConversations = matches.length
+      ? await Conversation.find({
+          customerId: { $in: matches.map((customer) => customer._id) },
+          status: { $in: ['OPEN', 'HUMAN_HANDOVER'] },
+        })
+          .sort({ updatedAt: -1 })
+          .lean()
+      : [];
+    if (activeConversations.length > 1) {
+      throw new ApiError(
+        409,
+        'Multiple active customer records match this number. Resolve the duplicate records before starting a chat.',
+        'AMBIGUOUS_CUSTOMER',
+      );
+    }
+
+    let customer = matches.length === 1
+      ? await Customer.findById(matches[0]!._id)
+      : activeConversations.length === 1
+        ? await Customer.findById(activeConversations[0]!.customerId)
+        : null;
+    if (matches.length > 1 && activeConversations.length !== 1) {
+      throw new ApiError(
+        409,
+        'Multiple customer records match this number. Resolve the duplicate records before starting a chat.',
+        'AMBIGUOUS_CUSTOMER',
+      );
+    }
+    const consentRecordedAt = new Date();
+    if (!customer) {
+      customer = await Customer.create({
+        name: input.name,
+        whatsappId: phoneNumber,
+        phoneNumber,
+        phoneIdentity: normalizePhoneIdentity(phoneNumber),
+        optInStatus: 'OPTED_IN',
+        optInAt: consentRecordedAt,
+        optInSource: input.consentSource,
+      });
+    } else {
+      customer.phoneNumber = phoneNumber;
+      customer.phoneIdentity = normalizePhoneIdentity(phoneNumber);
+      if (input.name) customer.name = input.name;
+      if (customer.optInStatus !== 'OPTED_IN') {
+        customer.optInStatus = 'OPTED_IN';
+        customer.optInAt = consentRecordedAt;
+        customer.optInSource = input.consentSource;
+      }
+      await customer.save();
+    }
+
+    const conversation =
+      activeConversations[0] ??
+      (await Conversation.create({ customerId: customer._id, status: 'OPEN', currentStep: 'NEW' }));
+    await recordActivity({
+      source: 'USER',
+      action: 'WHATSAPP_CONVERSATION_STARTED',
+      summary: 'Started a WhatsApp conversation after recording verified customer opt-in',
+      resourceType: 'customer',
+      resourceId: customer.id,
+      actorId: (req as AuthenticatedRequest).user?.id,
+      actorRole: (req as AuthenticatedRequest).user?.role,
+    });
+    res.status(201).json({
+      success: true,
+      data: {
+        conversationId: String(conversation._id),
+        customerId: customer.id,
+        optInStatus: customer.optInStatus,
+      },
+    });
+  }),
+);
 
 conversationsRouter.post(
   '/:id/resume-automation',

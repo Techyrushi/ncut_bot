@@ -25,6 +25,7 @@ const conversationSchema = new Schema(
     lastMessageAt: { type: Date, index: true },
     handoverAt: { type: Date },
     lastInteractionAt: { type: Date, index: true },
+    lastInboundMessageAt: { type: Date, index: true },
   },
   { timestamps: true },
 );

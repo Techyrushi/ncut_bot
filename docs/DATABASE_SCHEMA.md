@@ -20,9 +20,10 @@ All timestamps are UTC dates. Mongoose `timestamps` adds `createdAt` and `update
 
 ## Conversation
 
-`customerId`, `status` (`OPEN | HUMAN_HANDOVER | CLOSED`), `currentStep` (`NEW`, `WELCOME_SENT`, `PRODUCT_MENU`, `PRODUCT_DETAILS`, `INTEREST_TRIGGERED`, `HUMAN_HANDOVER`, `CLOSED`), `selectedProductIds`, `uniqueProductCount`, `interestTriggeredAt`, `interestPromptStatus`, `interestPromptLockedAt`, `currentCategory`, `lastMessageAt`, `lastInteractionAt`, and `handoverAt`.
+`customerId`, `status` (`OPEN | HUMAN_HANDOVER | CLOSED`), `currentStep` (`NEW`, `WELCOME_SENT`, `PRODUCT_MENU`, `PRODUCT_DETAILS`, `INTEREST_TRIGGERED`, `HUMAN_HANDOVER`, `CLOSED`), `selectedProductIds`, `uniqueProductCount`, `interestTriggeredAt`, `interestPromptStatus`, `interestPromptLockedAt`, `currentCategory`, `lastMessageAt`, `lastInteractionAt`, `lastInboundMessageAt`, and `handoverAt`.
 
 - Partial unique index permits one `OPEN` conversation per customer.
+- The WhatsApp service window is calculated only from `lastInboundMessageAt`; webhook timestamps are normalized to UTC, and startup backfills this field from inbound message history for existing conversations.
 - Customer/status/updated and recent-message indexes serve admin lists.
 - Product selection uses a conditional atomic update and add-to-set to count only first-time product IDs.
 

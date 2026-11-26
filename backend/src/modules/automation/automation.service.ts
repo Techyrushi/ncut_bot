@@ -5,9 +5,12 @@ import { Conversation } from '../../database/models/conversation.model';
 import { Customer, normalizePhoneIdentity } from '../../database/models/customer.model';
 import { Lead, SALES_FOLLOW_UP_REQUIREMENT } from '../../database/models/lead.model';
 import { Message } from '../../database/models/message.model';
+import { BulkCampaignRecipient } from '../../database/models/bulk-campaign.model';
 import { Product } from '../../database/models/product.model';
 import { DEFAULT_WELCOME_MESSAGE, WorkspaceSettings } from '../../database/models/workspace-settings.model';
 import { whatsappService } from '../whatsapp/whatsapp.service';
+import { parseWhatsAppTimestamp } from '../whatsapp/service-window';
+import { phoneNumberCandidates } from '../customers/phone-number';
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const PRODUCT_CATALOGUE_IMAGE_URL = new URL('/ncut-product-catalogue.jpg', env.FRONTEND_URL).toString();
@@ -56,7 +59,6 @@ type IncomingMessage = {
 type InteractiveButton = { id: string; title: string };
 type InteractiveRow = { id: string; title: string; description?: string };
 type InteractiveSection = { title: string; rows: InteractiveRow[] };
-type ProductCatalogSection = { title: string; product_items: Array<{ product_retailer_id: string }> };
 type DeliveryAction =
   | { type: 'WELCOME_OPTIONS'; body: string; buttons: InteractiveButton[] }
   | {
@@ -127,24 +129,127 @@ function messageContent(message: IncomingMessage): Record<string, unknown> {
   return { type: message.type };
 }
 
-export class AutomationService {
-  async processIncoming(message: IncomingMessage, profileName?: string): Promise<void> {
-    const recipient = message.from ?? message.from_user_id;
-    const customerIdentity = message.from_user_id ?? recipient;
-    if (!recipient || !customerIdentity) throw new Error('Incoming WhatsApp message has no sender identity');
+async function findOrUpdateIncomingCustomer(
+  message: IncomingMessage,
+  customerIdentity: string,
+  profileName?: string,
+) {
+  const phone = message.from?.replace(/\D/g, '');
+  const phoneCandidates = phone ? phoneNumberCandidates(phone) : [];
+  const phoneIdentities = phone
+    ? [...new Set([phone, ...phoneCandidates.map((candidate) => candidate.replace(/\D/g, ''))])]
+    : [];
+  const matches = await Customer.find({
+    $or: [
+      { whatsappId: customerIdentity },
+      ...(phoneIdentities.length ? [{ phoneIdentity: { $in: phoneIdentities } }] : []),
+      ...(phoneCandidates.length
+        ? [{ phoneNumber: { $in: phoneCandidates } }, { whatsappId: { $in: phoneCandidates } }]
+        : []),
+    ],
+  }).sort({ createdAt: 1 });
+
+  if (!matches.length) {
+    const phoneIdentity = normalizePhoneIdentity(message.from ?? customerIdentity);
     const customer = await Customer.findOneAndUpdate(
       { whatsappId: customerIdentity },
       {
         $set: {
           ...(message.from ? { phoneNumber: message.from } : {}),
           ...(profileName ? { profileName } : {}),
-          phoneIdentity: normalizePhoneIdentity(message.from ?? customerIdentity),
+          phoneIdentity,
         },
         $setOnInsert: { optInStatus: 'UNKNOWN' },
       },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
-    const receivedAt = new Date(Number(message.timestamp) * 1000);
+    if (!customer) throw new Error('Unable to create or locate the WhatsApp customer');
+    return customer;
+  }
+
+  const customerIds = matches.map((customer) => customer._id);
+  const latestTemplateMessage = await Message.findOne({
+    customerId: { $in: customerIds },
+    direction: 'OUTBOUND',
+    messageType: 'TEMPLATE',
+  })
+    .sort({ timestamp: -1 })
+    .select('customerId')
+    .lean();
+  const latestOutboundMessage = latestTemplateMessage
+    ? null
+    : await Message.findOne({ customerId: { $in: customerIds }, direction: 'OUTBOUND' })
+        .sort({ timestamp: -1 })
+        .select('customerId')
+        .lean();
+  const outboundCustomerId = latestTemplateMessage?.customerId ?? latestOutboundMessage?.customerId;
+  const activeConversation = outboundCustomerId
+    ? null
+    : await Conversation.findOne({
+        customerId: { $in: customerIds },
+        status: { $in: ['OPEN', 'HUMAN_HANDOVER'] },
+      })
+        .sort({ updatedAt: -1 })
+        .select('customerId')
+        .lean();
+  const canonical =
+    matches.find((candidate) => candidate._id.equals(outboundCustomerId ?? activeConversation?.customerId)) ??
+    matches.find((candidate) => candidate.whatsappId === customerIdentity) ??
+    matches.find((candidate) => candidate.optInStatus === 'OPTED_IN') ??
+    matches[0]!;
+  const duplicates = matches.filter((candidate) => !candidate._id.equals(canonical._id));
+  const optedOutRecord = matches.find((candidate) => candidate.optInStatus === 'OPTED_OUT');
+  const optedInRecord = matches.find((candidate) => candidate.optInStatus === 'OPTED_IN');
+
+  if (!canonical.name) canonical.name = matches.find((candidate) => candidate.name)?.name;
+  if (!profileName && !canonical.profileName) {
+    canonical.profileName = matches.find((candidate) => candidate.profileName)?.profileName;
+  }
+  if (optedOutRecord) {
+    canonical.optInStatus = 'OPTED_OUT';
+    canonical.optInAt = undefined;
+    canonical.optInSource = optedOutRecord.optInSource;
+  } else if (canonical.optInStatus !== 'OPTED_IN' && optedInRecord) {
+    canonical.optInStatus = 'OPTED_IN';
+    canonical.optInAt = optedInRecord.optInAt;
+    canonical.optInSource = optedInRecord.optInSource;
+  }
+  if (message.from) canonical.phoneNumber = message.from;
+  if (profileName) canonical.profileName = profileName;
+  canonical.phoneIdentity = normalizePhoneIdentity(message.from ?? customerIdentity);
+  await canonical.save();
+
+  if (duplicates.length) {
+    const duplicateIds = duplicates.map((customer) => customer._id);
+    await Conversation.updateMany(
+      { customerId: { $in: duplicateIds }, status: { $in: ['OPEN', 'HUMAN_HANDOVER'] } },
+      { $set: { status: 'CLOSED', currentStep: 'CLOSED' } },
+    );
+    await Promise.all([
+      Conversation.updateMany({ customerId: { $in: duplicateIds } }, { $set: { customerId: canonical._id } }),
+      Message.updateMany({ customerId: { $in: duplicateIds } }, { $set: { customerId: canonical._id } }),
+      Lead.updateMany({ customerId: { $in: duplicateIds } }, { $set: { customerId: canonical._id } }),
+      BulkCampaignRecipient.updateMany(
+        { customerId: { $in: duplicateIds } },
+        { $set: { customerId: canonical._id } },
+      ),
+    ]);
+    await Customer.deleteMany({ _id: { $in: duplicateIds } });
+  }
+
+  canonical.whatsappId = customerIdentity;
+  canonical.phoneIdentity = normalizePhoneIdentity(message.from ?? customerIdentity);
+  await canonical.save();
+  return canonical;
+}
+
+export class AutomationService {
+  async processIncoming(message: IncomingMessage, profileName?: string): Promise<void> {
+    const recipient = message.from ?? message.from_user_id;
+    const customerIdentity = message.from_user_id ?? recipient;
+    if (!recipient || !customerIdentity) throw new Error('Incoming WhatsApp message has no sender identity');
+    const customer = await findOrUpdateIncomingCustomer(message, customerIdentity, profileName);
+    const receivedAt = parseWhatsAppTimestamp(message.timestamp);
     let conversation = await Conversation.findOne({
       customerId: customer._id,
       status: { $in: ['OPEN', 'HUMAN_HANDOVER'] },
@@ -152,15 +257,15 @@ export class AutomationService {
     if (!conversation) conversation = await Conversation.findOne({ customerId: customer._id }).sort({ updatedAt: -1 });
     if (conversation?.status === 'HUMAN_HANDOVER') {
       await this.saveInbound(message, customer._id, conversation._id, receivedAt);
-      conversation.lastMessageAt = receivedAt;
-      conversation.lastInteractionAt = receivedAt;
+      await Conversation.updateOne(
+        { _id: conversation._id },
+        { $max: { lastMessageAt: receivedAt, lastInteractionAt: receivedAt, lastInboundMessageAt: receivedAt } },
+      );
       if (/^(stop|unsubscribe|opt out)$/i.test(message.text?.body?.trim() ?? '')) {
         customer.optInStatus = 'OPTED_OUT';
         await customer.save();
-        await conversation.save();
         return;
       }
-      await conversation.save();
       if (customer.optInStatus === 'OPTED_OUT') return;
 
       const handoverSelection = this.selection(message);
@@ -260,9 +365,10 @@ export class AutomationService {
     if (!conversation) throw new Error('Unable to create or locate an active conversation');
 
     await this.saveInbound(message, customer._id, conversation._id, receivedAt);
-    conversation.lastMessageAt = receivedAt;
-    conversation.lastInteractionAt = receivedAt;
-    await conversation.save();
+    await Conversation.updateOne(
+      { _id: conversation._id },
+      { $max: { lastMessageAt: receivedAt, lastInteractionAt: receivedAt, lastInboundMessageAt: receivedAt } },
+    );
 
     const input = this.selection(message);
     const text = message.text?.body?.trim() ?? '';

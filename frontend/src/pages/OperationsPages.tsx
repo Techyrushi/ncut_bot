@@ -119,6 +119,8 @@ export function TemplatesPage() {
   const { user } = useAuth();
   const [form, setForm] = useState({ name: '', metaTemplateId: '', languageCode: 'en_US', category: 'UTILITY' });
   const [defaultSendComponents, setDefaultSendComponents] = useState('[]');
+  const [editingTemplate, setEditingTemplate] = useState<BasicRecord | null>(null);
+  const [editingDefaults, setEditingDefaults] = useState('[]');
   const [notice, setNotice] = useState('');
   const templates = useQuery({
     queryKey: ['templates'],
@@ -128,7 +130,10 @@ export function TemplatesPage() {
     mutationFn: async (components: Array<Record<string, unknown>>) =>
       api.post('/templates', { ...form, components: [], defaultSendComponents: components }),
     onSuccess: async () => {
-      await client.invalidateQueries({ queryKey: ['templates'] });
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['templates'] }),
+        client.invalidateQueries({ queryKey: ['approved-message-templates'] }),
+      ]);
       setForm({ name: '', metaTemplateId: '', languageCode: 'en_US', category: 'UTILITY' });
       setDefaultSendComponents('[]');
       setNotice('Template record added. Confirm its status in WhatsApp Manager before sending.');
@@ -142,6 +147,36 @@ export function TemplatesPage() {
       await client.invalidateQueries({ queryKey: ['templates'] });
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : 'Unable to update template status.'),
+  });
+  const saveDefaults = useMutation({
+    mutationFn: async () => {
+      if (!editingTemplate) throw new Error('Select a template to edit.');
+      let components: unknown;
+      try {
+        components = JSON.parse(editingDefaults);
+      } catch {
+        throw new Error('Default send components must be valid JSON.');
+      }
+      if (
+        !Array.isArray(components) ||
+        components.length > 20 ||
+        components.some((component) => !isRecord(component))
+      ) {
+        throw new Error('Default send components must be an array of up to 20 component objects.');
+      }
+      return api.patch(`/templates/${editingTemplate._id}/default-send-components`, {
+        defaultSendComponents: components,
+      });
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['templates'] }),
+        client.invalidateQueries({ queryKey: ['approved-message-templates'] }),
+      ]);
+      setEditingTemplate(null);
+      setNotice('Default send values saved. The approved Meta template itself is unchanged.');
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : 'Unable to save template defaults.'),
   });
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -220,6 +255,38 @@ export function TemplatesPage() {
           </button>
         </form>
       )}
+      {user?.role === 'ADMIN' && editingTemplate && (
+        <form
+          className="panel template-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            saveDefaults.mutate();
+          }}
+        >
+          <div className="eyebrow">EDIT DEFAULT SEND VALUES</div>
+          <h2>{String(editingTemplate.name)} · {String(editingTemplate.languageCode)}</h2>
+          <label>
+            Default values for this approved template
+            <textarea
+              rows={5}
+              value={editingDefaults}
+              onChange={(event) => setEditingDefaults(event.target.value)}
+              aria-describedby="default-send-values-help"
+            />
+            <span id="default-send-values-help" className="form-hint">
+              These values prefill sends when no per-message values are provided. This does not edit Meta’s approved template.
+            </span>
+          </label>
+          <div className="form-actions">
+            <button type="button" className="secondary-button" onClick={() => setEditingTemplate(null)}>
+              Cancel
+            </button>
+            <button className="primary-button" disabled={saveDefaults.isPending}>
+              {saveDefaults.isPending ? 'Saving…' : 'Save defaults'} <span>→</span>
+            </button>
+          </div>
+        </form>
+      )}
       <section className="panel table-panel">
         <div className="panel-heading">
           <div>
@@ -236,7 +303,7 @@ export function TemplatesPage() {
                 <th>LANGUAGE</th>
                 <th>CATEGORY</th>
                 <th>META STATUS</th>
-                <th>UPDATE STATUS</th>
+                <th>ADMIN ACTIONS</th>
               </tr>
             </thead>
             <tbody>
@@ -255,15 +322,28 @@ export function TemplatesPage() {
                   </td>
                   <td>
                     {user?.role === 'ADMIN' ? (
-                      <select
-                        value={String(template.metaStatus)}
-                        onChange={(e) => update.mutate({ id: template._id, metaStatus: e.target.value })}
-                      >
-                        <option>PENDING</option>
-                        <option>APPROVED</option>
-                        <option>REJECTED</option>
-                        <option>PAUSED</option>
-                      </select>
+                      <div className="template-admin-actions">
+                        <select
+                          aria-label={`Status for ${String(template.name)}`}
+                          value={String(template.metaStatus)}
+                          onChange={(e) => update.mutate({ id: template._id, metaStatus: e.target.value })}
+                        >
+                          <option>PENDING</option>
+                          <option>APPROVED</option>
+                          <option>REJECTED</option>
+                          <option>PAUSED</option>
+                        </select>
+                        <button
+                          type="button"
+                          className="text-button"
+                          onClick={() => {
+                            setEditingTemplate(template);
+                            setEditingDefaults(JSON.stringify(template.defaultSendComponents ?? [], null, 2));
+                          }}
+                        >
+                          Edit defaults
+                        </button>
+                      </div>
                     ) : (
                       '—'
                     )}
@@ -756,11 +836,23 @@ export function ConversationsPage() {
   const selectedId = searchParams.get('conversation') ?? '';
   const [reply, setReply] = useState('');
   const [templateId, setTemplateId] = useState('');
-  const [templateComponents, setTemplateComponents] = useState('[]');
+  const [templateParameters, setTemplateParameters] = useState<Record<string, string>>({});
+  const [clockNow, setClockNow] = useState(Date.now());
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [attachment, setAttachment] = useState<File>();
   const [attachmentPreview, setAttachmentPreview] = useState('');
   const [attachmentError, setAttachmentError] = useState('');
+  const [interactiveMode, setInteractiveMode] = useState(false);
+  const [interactiveBody, setInteractiveBody] = useState('');
+  const [interactiveButtonTitles, setInteractiveButtonTitles] = useState('');
+  const [serviceWindowRejected, setServiceWindowRejected] = useState(false);
+  const [showNewChat, setShowNewChat] = useState(false);
+  const [newChatForm, setNewChatForm] = useState({
+    phoneNumber: '',
+    name: '',
+    consentSource: 'Meta Business',
+    consentConfirmed: false,
+  });
   const lastReadRequest = useRef('');
   const client = useQueryClient();
   const messageEndRef = useRef<HTMLDivElement>(null);
@@ -775,6 +867,9 @@ export function ConversationsPage() {
     setAttachmentPreview('');
     setAttachmentError('');
     setShowEmojiPicker(false);
+    setInteractiveMode(false);
+    setInteractiveBody('');
+    setInteractiveButtonTitles('');
   }, [selectedId]);
 
   const conversations = useQuery({
@@ -800,9 +895,38 @@ export function ConversationsPage() {
         (template) => template.metaStatus === 'APPROVED',
       ),
   });
+  const startConversation = useMutation({
+    mutationFn: async () =>
+      (await api.post<ApiResponse<{ conversationId: string }>>('/conversations/start', newChatForm)).data.data,
+    onSuccess: async ({ conversationId }) => {
+      setShowNewChat(false);
+      setNewChatForm({ phoneNumber: '', name: '', consentSource: 'Meta Business', consentConfirmed: false });
+      await client.invalidateQueries({ queryKey: ['conversations'] });
+      setSearchParams({ conversation: conversationId });
+    },
+  });
   const selected = conversations.data?.find((conversation) => conversation._id === selectedId);
-  const lastInteraction = selected?.lastInteractionAt ? new Date(String(selected.lastInteractionAt)).getTime() : 0;
-  const serviceWindowOpen = lastInteraction > Date.now() - 24 * 60 * 60 * 1000;
+  const lastInboundMessageAt = selected?.lastInboundMessageAt
+    ? new Date(String(selected.lastInboundMessageAt)).getTime()
+    : 0;
+  const serviceWindowExpiresAt = lastInboundMessageAt + 24 * 60 * 60 * 1000;
+  const serviceWindowRemaining = Math.max(0, serviceWindowExpiresAt - clockNow);
+  const serviceWindowOpen =
+    !serviceWindowRejected &&
+    lastInboundMessageAt > 0 &&
+    lastInboundMessageAt <= clockNow &&
+    clockNow < serviceWindowExpiresAt;
+  const selectedTemplate = approvedTemplates.data?.find((template) => template._id === templateId);
+  const templateFields = getTemplateFields(selectedTemplate);
+  useEffect(() => {
+    const timer = window.setInterval(() => setClockNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    setServiceWindowRejected(false);
+    setTemplateId('');
+    setTemplateParameters({});
+  }, [selectedId, selected?.lastInboundMessageAt]);
   useEffect(() => {
     messageEndRef.current?.scrollIntoView({ block: 'end', behavior: 'smooth' });
   }, [messages.data, selectedId]);
@@ -885,39 +1009,64 @@ export function ConversationsPage() {
         client.invalidateQueries({ queryKey: ['conversations'] }),
       ]);
     },
-    onError: (_error, _variables, context) => {
+    onError: (error, _variables, context) => {
       if (context?.previous) client.setQueryData(['conversation-messages', selectedId], context.previous);
+      if (isServiceWindowExpired(error)) {
+        setServiceWindowRejected(true);
+        void client.invalidateQueries({ queryKey: ['conversations'] });
+      }
     },
   });
   const sendTemplate = useMutation({
     mutationFn: async () => {
       const customerId = getId(selected?.customerId);
       if (!customerId) throw new Error('The selected conversation has no customer record.');
-      let components: unknown;
-      try {
-        components = JSON.parse(templateComponents);
-      } catch {
-        throw new Error('Template components must be valid JSON.');
-      }
-      if (
-        !Array.isArray(components) ||
-        components.some((component) => !component || typeof component !== 'object' || Array.isArray(component))
-      ) {
-        throw new Error('Template components must be a JSON array of component objects.');
-      }
+      const components = buildTemplateComponents(selectedTemplate, templateFields, templateParameters);
       return api.post('/whatsapp/send-template', { customerId, templateId, components });
     },
     onSuccess: async () => {
       setTemplateId('');
-      setTemplateComponents('[]');
+      setTemplateParameters({});
       await Promise.all([
         client.invalidateQueries({ queryKey: ['conversation-messages', selectedId] }),
         client.invalidateQueries({ queryKey: ['conversations'] }),
       ]);
     },
   });
+  const sendInteractive = useMutation({
+    mutationFn: async () => {
+      const customerId = getId(selected?.customerId);
+      if (!customerId) throw new Error('The selected conversation has no customer record.');
+      const buttons = interactiveButtonTitles
+        .split('\n')
+        .map((title, index) => ({ id: `reply_${index + 1}`, title: title.trim() }))
+        .filter((button) => button.title);
+      return api.post('/whatsapp/send-interactive', { customerId, body: interactiveBody.trim(), buttons });
+    },
+    onSuccess: async () => {
+      setInteractiveMode(false);
+      setInteractiveBody('');
+      setInteractiveButtonTitles('');
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['conversation-messages', selectedId] }),
+        client.invalidateQueries({ queryKey: ['conversations'] }),
+      ]);
+    },
+    onError: (error) => {
+      if (isServiceWindowExpired(error)) {
+        setServiceWindowRejected(true);
+        void client.invalidateQueries({ queryKey: ['conversations'] });
+      }
+    },
+  });
+  function closeNewChat(): void {
+    setShowNewChat(false);
+    setNewChatForm({ phoneNumber: '', name: '', consentSource: 'Meta Business', consentConfirmed: false });
+    startConversation.reset();
+  }
   function submitReply(event: FormEvent): void {
     event.preventDefault();
+    if (interactiveMode) return;
     if (reply.trim() || attachment) sendReply.mutate();
   }
   function chooseAttachment(file?: File): void {
@@ -947,11 +1096,23 @@ export function ConversationsPage() {
           <h1>Conversations</h1>
           <p>Reply to customers and follow WhatsApp delivery and read receipts.</p>
         </div>
-        {user?.role === 'ADMIN' && (
-          <Link to="/bulk-campaigns" className="primary-button">
-            Bulk message
-          </Link>
-        )}
+        <div className="conversation-page-actions">
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => {
+              startConversation.reset();
+              setShowNewChat(true);
+            }}
+          >
+            New chat
+          </button>
+          {user?.role === 'ADMIN' && (
+            <Link to="/bulk-campaigns" className="primary-button">
+              Bulk message
+            </Link>
+          )}
+        </div>
       </div>
       <div className={`content-grid conversation-grid ${selectedId ? 'mobile-has-selection' : ''}`}>
         <section className="panel conversation-list">
@@ -1002,7 +1163,7 @@ export function ConversationsPage() {
                 <h2>{selected ? display(selected.customerId) : 'Select a conversation'}</h2>
                 {selected && (
                   <span className="contact-subtitle">
-                    {customerPhone(selected.customerId)} · {customerActivity(selected.lastInteractionAt)}
+                    {customerPhone(selected.customerId)} · {customerActivity(selected.lastInboundMessageAt)}
                   </span>
                 )}
               </div>
@@ -1104,77 +1265,135 @@ export function ConversationsPage() {
             <section className="message-composer">
               {serviceWindowOpen ? (
                 <form onSubmit={submitReply}>
-                  {attachmentPreview && (
-                    <div className="attachment-preview">
-                      <img src={attachmentPreview} alt="Attachment preview" />
-                      <button
-                        type="button"
-                        className="text-button danger-text"
-                        onClick={() => {
-                          setAttachment(undefined);
-                          setAttachmentPreview('');
-                          setAttachmentError('');
-                        }}
-                      >
-                        Remove image
-                      </button>
-                    </div>
-                  )}
-                  <div className="composer-input-row">
-                    <div className="composer-tools">
-                      <button
-                        type="button"
-                        className="composer-tool"
-                        aria-label="Add emoji"
-                        aria-expanded={showEmojiPicker}
-                        onClick={() => setShowEmojiPicker((shown) => !shown)}
-                      >
-                        ☺
-                      </button>
-                      <label className="composer-tool attach-tool" aria-label="Attach image">
-                        +
-                        <input
-                          type="file"
-                          accept="image/jpeg,image/png,image/webp"
-                          onChange={(event) => chooseAttachment(event.target.files?.[0])}
+                  <label className="interactive-toggle">
+                    <input
+                      className="interactive-toggle-checkbox"
+                      type="checkbox"
+                      checked={interactiveMode}
+                      onChange={(event) => setInteractiveMode(event.target.checked)}
+                    />
+                    <span>Send interactive reply buttons</span>
+                  </label>
+                  {interactiveMode && (
+                    <>
+                      <label>
+                        Interactive message
+                        <textarea
+                          value={interactiveBody}
+                          onChange={(event) => setInteractiveBody(event.target.value)}
+                          maxLength={1024}
+                          placeholder="Message shown with reply buttons"
+                          rows={2}
                         />
                       </label>
-                    </div>
-                    <textarea
-                      aria-label="Message"
-                      value={reply}
-                      onChange={(event) => setReply(event.target.value)}
-                      maxLength={attachment ? 1024 : 4096}
-                      placeholder="Write a WhatsApp message…"
-                      rows={1}
-                    />
-                    <button
-                      className="primary-button"
-                      disabled={sendReply.isPending || Boolean(attachmentError) || (!reply.trim() && !attachment)}
-                    >
-                      {sendReply.isPending ? 'Sending…' : 'Send'} <span>→</span>
-                    </button>
-                  </div>
-                  {showEmojiPicker && (
-                    <div className="emoji-picker" aria-label="Choose an emoji">
-                      {['🙂', '😊', '👍', '❤️', '🎉', '🙏', '✨', '👋'].map((emoji) => (
-                        <button key={emoji} type="button" onClick={() => insertEmoji(emoji)}>
-                          {emoji}
+                      <label>
+                        Button titles (one per line, up to 3; 20 characters each)
+                        <textarea
+                          value={interactiveButtonTitles}
+                          onChange={(event) => setInteractiveButtonTitles(event.target.value)}
+                          placeholder={'View products\nContact sales'}
+                          rows={3}
+                        />
+                      </label>
+                      <button
+                        type="button"
+                        className="primary-button"
+                        disabled={
+                          sendInteractive.isPending ||
+                          !interactiveBody.trim() ||
+                          interactiveButtonTitles.split('\n').filter((title) => title.trim()).length < 1 ||
+                          interactiveButtonTitles.split('\n').filter((title) => title.trim()).length > 3 ||
+                          interactiveButtonTitles.split('\n').some((title) => title.trim().length > 20)
+                        }
+                        onClick={() => sendInteractive.mutate()}
+                      >
+                        {sendInteractive.isPending ? 'Sending…' : 'Send interactive message'} <span>→</span>
+                      </button>
+                      {sendInteractive.isError && !isServiceWindowExpired(sendInteractive.error) && (
+                        <div className="alert error">
+                          {sendInteractive.error instanceof Error
+                            ? sendInteractive.error.message
+                            : 'Interactive message was not sent.'}
+                        </div>
+                      )}
+                    </>
+                  )}
+                  {!interactiveMode && (
+                    <>
+                      {attachmentPreview && (
+                        <div className="attachment-preview">
+                          <img src={attachmentPreview} alt="Attachment preview" />
+                          <button
+                            type="button"
+                            className="text-button danger-text"
+                            onClick={() => {
+                              setAttachment(undefined);
+                              setAttachmentPreview('');
+                              setAttachmentError('');
+                            }}
+                          >
+                            Remove image
+                          </button>
+                        </div>
+                      )}
+                      <div className="composer-input-row">
+                        <div className="composer-tools">
+                          <button
+                            type="button"
+                            className="composer-tool"
+                            aria-label="Add emoji"
+                            aria-expanded={showEmojiPicker}
+                            onClick={() => setShowEmojiPicker((shown) => !shown)}
+                          >
+                            ☺
+                          </button>
+                          <label className="composer-tool attach-tool" aria-label="Attach image">
+                            +
+                            <input
+                              type="file"
+                              accept="image/jpeg,image/png,image/webp"
+                              onChange={(event) => chooseAttachment(event.target.files?.[0])}
+                            />
+                          </label>
+                        </div>
+                        <textarea
+                          aria-label="Message"
+                          value={reply}
+                          onChange={(event) => setReply(event.target.value)}
+                          maxLength={attachment ? 1024 : 4096}
+                          placeholder="Write a WhatsApp message…"
+                          rows={1}
+                        />
+                        <button
+                          className="primary-button"
+                          disabled={sendReply.isPending || Boolean(attachmentError) || (!reply.trim() && !attachment)}
+                        >
+                          {sendReply.isPending ? 'Sending…' : 'Send'} <span>→</span>
                         </button>
-                      ))}
-                    </div>
+                      </div>
+                      {showEmojiPicker && (
+                        <div className="emoji-picker" aria-label="Choose an emoji">
+                          {['🙂', '😊', '👍', '❤️', '🎉', '🙏', '✨', '👋'].map((emoji) => (
+                            <button key={emoji} type="button" onClick={() => insertEmoji(emoji)}>
+                              {emoji}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      {sendReply.isError && (
+                        <div className="alert error">
+                          {sendReply.error instanceof Error ? sendReply.error.message : 'Message was not sent.'}
+                        </div>
+                      )}
+                      {attachmentError && <div className="alert error">{attachmentError}</div>}
+                      <div className="composer-footer">
+                        <span className="small muted">
+                          WhatsApp service window · {formatCountdown(serviceWindowRemaining)} remaining ·{' '}
+                          {(attachment ? 1024 : 4096) - reply.length} characters left
+                        </span>
+                      </div>
+                    </>
                   )}
-                  {sendReply.isError && (
-                    <div className="alert error">
-                      {sendReply.error instanceof Error ? sendReply.error.message : 'Message was not sent.'}
-                    </div>
-                  )}
-                  {attachmentError && <div className="alert error">{attachmentError}</div>}
-                  <div className="composer-footer">
-                    <span className="small muted">
-                      WhatsApp customer service window · {(attachment ? 1024 : 4096) - reply.length} characters left
-                    </span>
-                  </div>
                 </form>
               ) : (
                 <form
@@ -1184,9 +1403,18 @@ export function ConversationsPage() {
                     sendTemplate.mutate();
                   }}
                 >
-                  <div className="alert error">
-                    The 24-hour service window is closed. An approved template and recorded customer opt-in are
-                    required.
+                  <div className="service-window-notice" role="status">
+                    <span className="service-window-notice-icon" aria-hidden="true">
+                      i
+                    </span>
+                    <div>
+                      <strong>{lastInboundMessageAt ? 'Continue with a template' : 'Start with a template'}</strong>
+                      <p>
+                        {lastInboundMessageAt
+                          ? 'The 24-hour reply period has ended. Choose an approved template to continue; the contact must have recorded opt-in.'
+                          : 'This contact has not messaged you yet. An approved template can start the conversation. Regular replies are available after they respond.'}
+                      </p>
+                    </div>
                   </div>
                   <label>
                     Approved template
@@ -1204,18 +1432,23 @@ export function ConversationsPage() {
                       ))}
                     </select>
                   </label>
-                  <label>
-                    Template components JSON
-                    <textarea
-                      value={templateComponents}
-                      onChange={(event) => setTemplateComponents(event.target.value)}
-                      placeholder="[]"
-                      aria-describedby="template-components-help"
-                    />
-                  </label>
-                  <span id="template-components-help" className="small muted">
-                    Enter the approved template’s required components and parameters as a JSON array.
-                  </span>
+                  {templateFields.map((field) => (
+                    <label key={field.id}>
+                      {field.label}
+                      <input
+                        type={field.type === 'text' ? 'text' : 'url'}
+                        required
+                        value={templateParameters[field.id] ?? field.defaultValue}
+                        placeholder={field.placeholder}
+                        onChange={(event) =>
+                          setTemplateParameters((current) => ({ ...current, [field.id]: event.target.value }))
+                        }
+                      />
+                    </label>
+                  ))}
+                  {templateId && templateFields.length === 0 && (
+                    <span className="small muted">This approved template does not require any parameters.</span>
+                  )}
                   {approvedTemplates.isError && (
                     <div className="alert error">
                       {approvedTemplates.error instanceof Error
@@ -1232,7 +1465,12 @@ export function ConversationsPage() {
                     <span className="small muted">Meta delivery status appears in the conversation history.</span>
                     <button
                       className="primary-button"
-                      disabled={sendTemplate.isPending || !templateId || !approvedTemplates.data?.length}
+                      disabled={
+                        sendTemplate.isPending ||
+                        !templateId ||
+                        !approvedTemplates.data?.length ||
+                        templateFields.some((field) => !(templateParameters[field.id] ?? field.defaultValue).trim())
+                      }
                     >
                       {sendTemplate.isPending ? 'Sending…' : 'Send template'} <span>→</span>
                     </button>
@@ -1243,8 +1481,311 @@ export function ConversationsPage() {
           )}
         </section>
       </div>
+      {showNewChat && (
+        <div
+          className="modal-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !startConversation.isPending) closeNewChat();
+          }}
+        >
+          <section className="modal-card new-chat-modal" role="dialog" aria-modal="true" aria-labelledby="new-chat-title">
+            <div className="panel-heading">
+              <div>
+                <div className="eyebrow">WHATSAPP / NEW CHAT</div>
+                <h2 id="new-chat-title">Add a number</h2>
+                <p>Add the contact after confirming their WhatsApp opt-in.</p>
+              </div>
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="Close new chat dialog"
+                disabled={startConversation.isPending}
+                onClick={closeNewChat}
+              >
+                ×
+              </button>
+            </div>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                startConversation.mutate();
+              }}
+            >
+              <label className="field-label">
+                WhatsApp number
+                <input
+                  type="tel"
+                  inputMode="tel"
+                  autoComplete="tel"
+                  required
+                  maxLength={40}
+                  placeholder="+91 98765 43210"
+                  value={newChatForm.phoneNumber}
+                  onChange={(event) => setNewChatForm((current) => ({ ...current, phoneNumber: event.target.value }))}
+                />
+              </label>
+              <label className="field-label">
+                Customer name <span className="muted">(optional)</span>
+                <input
+                  maxLength={120}
+                  value={newChatForm.name}
+                  onChange={(event) => setNewChatForm((current) => ({ ...current, name: event.target.value }))}
+                />
+              </label>
+              <label className="field-label">
+                Verified opt-in source
+                <input
+                  required
+                  maxLength={500}
+                  readOnly
+                  value={newChatForm.consentSource}
+                />
+                <span className="form-hint">
+                  Use this source only when you have verified that the customer explicitly opted in through Meta
+                  Business.
+                </span>
+              </label>
+              <label className="new-chat-consent">
+                <input
+                  type="checkbox"
+                  required
+                  checked={newChatForm.consentConfirmed}
+                  onChange={(event) =>
+                    setNewChatForm((current) => ({ ...current, consentConfirmed: event.target.checked }))
+                  }
+                />
+                <span>
+                  I verified this person explicitly opted in to WhatsApp messages. I will not add opted-out or
+                  unconsented contacts.
+                </span>
+              </label>
+              <p className="form-hint">
+                If the customer has not messaged first, only an approved template can start the chat. Creating this
+                conversation does not send a message.
+              </p>
+              {startConversation.isError && (
+                <div className="alert error" role="alert">
+                  {startConversation.error instanceof Error
+                    ? startConversation.error.message
+                    : 'Unable to add this WhatsApp number.'}
+                </div>
+              )}
+              <div className="modal-actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  disabled={startConversation.isPending}
+                  onClick={closeNewChat}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="primary-button"
+                  disabled={
+                    startConversation.isPending ||
+                    !newChatForm.phoneNumber.trim() ||
+                    !newChatForm.consentSource.trim() ||
+                    !newChatForm.consentConfirmed
+                  }
+                >
+                  {startConversation.isPending ? 'Adding…' : 'Add to conversations'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
     </div>
   );
+}
+
+type TemplateParameterField = {
+  id: string;
+  label: string;
+  type: 'text' | 'image' | 'video' | 'document';
+  componentType: string;
+  componentIndex: number;
+  parameterIndex: number;
+  buttonIndex?: number;
+  source: 'template' | 'default';
+  defaultValue: string;
+  placeholder: string;
+};
+
+function getTemplateFields(template: BasicRecord | undefined): TemplateParameterField[] {
+  if (!template) return [];
+  const metadata = Array.isArray(template.components)
+    ? template.components.filter(isRecord)
+    : [];
+  const defaultComponents = Array.isArray(template.defaultSendComponents)
+    ? template.defaultSendComponents.filter(isRecord)
+    : [];
+  const fields: TemplateParameterField[] = [];
+  const defaultValue = (componentType: string, componentIndex: number, parameterIndex: number): string => {
+    const component = defaultComponents.find(
+      (item, index) => String(item.type ?? '').toLowerCase() === componentType && index === componentIndex,
+    );
+    const parameters = Array.isArray(component?.parameters) ? component.parameters : [];
+    const parameter = parameters[parameterIndex];
+    if (!parameter || typeof parameter !== 'object' || Array.isArray(parameter)) return '';
+    const item = parameter as Record<string, unknown>;
+    const mediaType = ['image', 'video', 'document'].find((type) => type in item);
+    if (mediaType) {
+      const media = item[mediaType];
+      return media && typeof media === 'object' && 'link' in media ? String(media.link) : '';
+    }
+    return typeof item.text === 'string' ? item.text : '';
+  };
+  const addField = (
+    componentType: string,
+    componentIndex: number,
+    parameterIndex: number,
+    type: TemplateParameterField['type'],
+    label: string,
+    source: TemplateParameterField['source'],
+    buttonIndex?: number,
+  ) => {
+    const id = buttonIndex === undefined
+      ? `${componentType}:${componentIndex}:${parameterIndex}`
+      : `button:${componentIndex}:${buttonIndex}:${parameterIndex}`;
+    fields.push({
+      id,
+      label,
+      type,
+      componentType,
+      componentIndex,
+      parameterIndex,
+      ...(buttonIndex === undefined ? {} : { buttonIndex }),
+      source,
+      defaultValue: defaultValue(componentType, componentIndex, parameterIndex),
+      placeholder: type === 'text' ? `Enter ${label.toLowerCase()}` : 'https://',
+    });
+  };
+
+  metadata.forEach((component, componentIndex) => {
+    const type = String(component.type ?? '').toUpperCase();
+    if (type === 'BODY' || type === 'HEADER') {
+      const format = String(component.format ?? '').toUpperCase();
+      if (type === 'HEADER' && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(format)) {
+        addField('header', componentIndex, 0, format.toLowerCase() as 'image' | 'video' | 'document', 'Header media URL', 'template');
+      } else {
+        const text = typeof component.text === 'string' ? component.text : '';
+        const count = [...text.matchAll(/\{\{\s*\d+\s*\}\}/g)].length;
+        for (let parameterIndex = 0; parameterIndex < count; parameterIndex += 1) {
+          addField(
+            type.toLowerCase(),
+            componentIndex,
+            parameterIndex,
+            'text',
+            `${type === 'BODY' ? 'Body' : 'Header'} parameter ${parameterIndex + 1}`,
+            'template',
+          );
+        }
+      }
+    }
+    if (type === 'BUTTONS' && Array.isArray(component.buttons)) {
+      component.buttons.forEach((button, buttonIndex) => {
+        if (!isRecord(button) || String(button.type).toUpperCase() !== 'URL') return;
+        const url = typeof button.url === 'string' ? button.url : '';
+        const count = [...url.matchAll(/\{\{\s*\d+\s*\}\}/g)].length;
+        for (let parameterIndex = 0; parameterIndex < count; parameterIndex += 1) {
+          addField('button', componentIndex, parameterIndex, 'text', `Button ${buttonIndex + 1} URL parameter`, 'template', buttonIndex);
+        }
+      });
+    }
+  });
+
+  if (!fields.length) {
+    defaultComponents.forEach((component, componentIndex) => {
+      const componentType = String(component.type ?? '').toLowerCase();
+      const parameters = Array.isArray(component.parameters) ? component.parameters : [];
+      parameters.forEach((parameter, parameterIndex) => {
+        if (!isRecord(parameter)) return;
+        const mediaType = (['image', 'video', 'document'] as const).find((type) => type in parameter);
+        addField(
+          componentType,
+          componentIndex,
+          parameterIndex,
+          mediaType ?? 'text',
+          `${componentType || 'Template'} parameter ${parameterIndex + 1}${mediaType ? ' URL' : ''}`,
+          'default',
+        );
+      });
+    });
+  }
+  return fields;
+}
+
+function buildTemplateComponents(
+  template: BasicRecord | undefined,
+  fields: TemplateParameterField[],
+  values: Record<string, string>,
+): Array<Record<string, unknown>> {
+  if (!template) return [];
+  const getValue = (field: TemplateParameterField) => values[field.id] ?? field.defaultValue;
+  if (fields.some((field) => field.source === 'default')) {
+    const components = Array.isArray(template.defaultSendComponents)
+      ? template.defaultSendComponents.filter(isRecord).map((component) => structuredClone(component))
+      : [];
+    for (const field of fields) {
+      const component = components[field.componentIndex];
+      if (!component || !Array.isArray(component.parameters)) continue;
+      const parameter = component.parameters[field.parameterIndex];
+      if (!isRecord(parameter)) continue;
+      if (field.type === 'text') component.parameters[field.parameterIndex] = { type: 'text', text: getValue(field) };
+      else component.parameters[field.parameterIndex] = {
+        type: field.type,
+        [field.type]: { link: getValue(field) },
+      };
+    }
+    return components;
+  }
+
+  const components = new Map<string, Record<string, unknown>>();
+  for (const field of fields) {
+    const value = getValue(field);
+    if (field.buttonIndex !== undefined) {
+      const key = `button:${field.componentIndex}:${field.buttonIndex}`;
+      const component = components.get(key) ?? {
+        type: 'button',
+        sub_type: 'url',
+        index: String(field.buttonIndex),
+        parameters: [] as Array<Record<string, unknown>>,
+      };
+      (component.parameters as Array<Record<string, unknown>>)[field.parameterIndex] = { type: 'text', text: value };
+      components.set(key, component);
+      continue;
+    }
+    const key = `${field.componentType}:${field.componentIndex}`;
+    const component = components.get(key) ?? { type: field.componentType, parameters: [] as Array<Record<string, unknown>> };
+    const parameters = component.parameters as Array<Record<string, unknown>>;
+    parameters[field.parameterIndex] = field.type === 'text'
+      ? { type: 'text', text: value }
+      : { type: field.type, [field.type]: { link: value } };
+    components.set(key, component);
+  }
+  return [...components.values()];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value));
+}
+
+function isServiceWindowExpired(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const response = value.response;
+  const data = isRecord(response) ? response.data : undefined;
+  const error = isRecord(data) ? data.error : undefined;
+  if (isRecord(error) && error.code === 'SERVICE_WINDOW_EXPIRED') return true;
+  return typeof value.message === 'string' && value.message.toLowerCase().includes('service window has expired');
+}
+
+function formatCountdown(milliseconds: number): string {
+  const seconds = Math.ceil(milliseconds / 1000);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return `${hours}h ${String(minutes).padStart(2, '0')}m ${String(seconds % 60).padStart(2, '0')}s`;
 }
 
 function display(value: unknown): string {
@@ -1277,7 +1818,7 @@ function formatRelativeDate(value: unknown): string {
   if (minutes < 60) return `${minutes}m ago`;
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ago`;
-  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return date.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', month: 'short', day: 'numeric' });
 }
 function displayMany(value: unknown): string {
   return Array.isArray(value) ? value.map(display).join(', ') || '—' : '—';
@@ -1290,7 +1831,9 @@ function getId(value: unknown): string {
 function formatDate(value: unknown): string {
   if (!value) return '—';
   const date = new Date(String(value));
-  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString();
+  return Number.isNaN(date.getTime())
+    ? '—'
+    : date.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' });
 }
 function messageText(value: unknown): string {
   if (!value || typeof value !== 'object') return String(value ?? '');

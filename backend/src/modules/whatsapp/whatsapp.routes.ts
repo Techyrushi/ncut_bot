@@ -8,6 +8,7 @@ import { authenticate, requireRoles } from '../../middleware/auth';
 import { asyncHandler } from '../../utils/async-handler';
 import { ApiError } from '../../utils/api-error';
 import { whatsappService } from './whatsapp.service';
+import { isServiceWindowOpen } from './service-window';
 
 const sendBase = z.object({ customerId: z.string().regex(/^[a-f\d]{24}$/i) });
 export const whatsappRouter = Router();
@@ -20,8 +21,7 @@ async function getMessagingContext(customerId: string) {
   if (!customer || !conversation) throw new ApiError(404, 'Active customer conversation not found', 'NOT_FOUND');
   if (customer.optInStatus === 'OPTED_OUT')
     throw new ApiError(409, 'Customer has opted out of messages', 'CUSTOMER_OPTED_OUT');
-  const lastInteraction = conversation.lastInteractionAt?.getTime();
-  if (!lastInteraction || Date.now() - lastInteraction > 24 * 60 * 60 * 1000) {
+  if (!isServiceWindowOpen(conversation.lastInboundMessageAt)) {
     throw new ApiError(
       409,
       'The 24-hour service window has expired; send an approved template instead',
@@ -86,7 +86,7 @@ whatsappRouter.post(
       customer.phoneNumber ?? customer.whatsappId,
       template.name,
       template.languageCode,
-      input.components,
+      input.components ?? template.defaultSendComponents,
     );
     const message = await Message.create({
       customerId: customer._id,
@@ -123,6 +123,39 @@ whatsappRouter.post(
       direction: 'OUTBOUND',
       messageType: 'IMAGE',
       content: { imageUrl: input.imageUrl, caption: input.caption },
+      status: 'SENT',
+      timestamp: new Date(),
+    });
+    res.status(201).json({ success: true, data: message });
+  }),
+);
+
+whatsappRouter.post(
+  '/send-interactive',
+  authenticate,
+  requireRoles('ADMIN', 'SALES'),
+  asyncHandler(async (req, res) => {
+    const input = sendBase
+      .extend({
+        body: z.string().trim().min(1).max(1024),
+        buttons: z.array(
+          z.object({ id: z.string().trim().min(1).max(256), title: z.string().trim().min(1).max(20) }),
+        ).min(1).max(3),
+      })
+      .parse(req.body);
+    const { customer, conversation } = await getMessagingContext(input.customerId);
+    const whatsappMessageId = await whatsappService.sendButtons(
+      customer.phoneNumber ?? customer.whatsappId,
+      input.body,
+      input.buttons,
+    );
+    const message = await Message.create({
+      customerId: customer._id,
+      conversationId: conversation._id,
+      whatsappMessageId,
+      direction: 'OUTBOUND',
+      messageType: 'INTERACTIVE',
+      content: { text: input.body, buttons: input.buttons },
       status: 'SENT',
       timestamp: new Date(),
     });

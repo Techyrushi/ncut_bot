@@ -11,10 +11,13 @@ import { recoverInterruptedCampaignSends, startBulkCampaignWorker } from './modu
 import { Lead } from './database/models/lead.model';
 import { WorkspaceSettings } from './database/models/workspace-settings.model';
 import { Customer, normalizePhoneIdentity } from './database/models/customer.model';
+import { Conversation } from './database/models/conversation.model';
+import { Message } from './database/models/message.model';
 
 async function start(): Promise<void> {
   await connectDatabase();
   await backfillCustomerPhoneIdentity();
+  await backfillLastInboundMessageAt();
   await initializeLeadReadTracking();
   await initializeAdminUser();
   await recoverInterruptedCampaignSends();
@@ -27,6 +30,34 @@ async function start(): Promise<void> {
     logger.info({ host: env.HOST, port: env.PORT }, 'HTTP server listening'),
   );
   registerShutdown(server, worker, campaignWorker);
+}
+
+async function backfillLastInboundMessageAt(): Promise<void> {
+  const conversations: unknown[] = [];
+  const flush = async (): Promise<void> => {
+    if (!conversations.length) return;
+    const ids = conversations.splice(0);
+    const latestInbound = await Message.aggregate<{ _id: mongoose.Types.ObjectId; timestamp: Date }>([
+      { $match: { conversationId: { $in: ids }, direction: 'INBOUND' } },
+      { $group: { _id: '$conversationId', timestamp: { $max: '$timestamp' } } },
+    ]);
+    if (!latestInbound.length) return;
+    await Conversation.bulkWrite(
+      latestInbound.map(({ _id, timestamp }) => ({
+        updateOne: {
+          filter: { _id, lastInboundMessageAt: { $exists: false } },
+          update: { $set: { lastInboundMessageAt: timestamp } },
+        },
+      })),
+    );
+  };
+  for await (const conversation of Conversation.find({ lastInboundMessageAt: { $exists: false } })
+    .select('_id')
+    .cursor()) {
+    conversations.push(conversation._id);
+    if (conversations.length >= 500) await flush();
+  }
+  await flush();
 }
 
 async function backfillCustomerPhoneIdentity(): Promise<void> {

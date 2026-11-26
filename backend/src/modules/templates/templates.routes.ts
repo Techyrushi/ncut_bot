@@ -43,6 +43,24 @@ templatesRouter.post(
 );
 
 templatesRouter.patch(
+  '/:id/default-send-components',
+  authenticate,
+  requireRoles('ADMIN'),
+  asyncHandler(async (req, res) => {
+    const { defaultSendComponents } = z
+      .object({ defaultSendComponents: z.array(z.record(z.string(), z.unknown())).max(20) })
+      .parse(req.body);
+    const template = await MessageTemplate.findByIdAndUpdate(
+      req.params.id,
+      { $set: { defaultSendComponents } },
+      { new: true, runValidators: true },
+    );
+    if (!template) throw new ApiError(404, 'Message template not found', 'NOT_FOUND');
+    res.json({ success: true, data: template });
+  }),
+);
+
+templatesRouter.patch(
   '/:id/status',
   authenticate,
   requireRoles('ADMIN'),

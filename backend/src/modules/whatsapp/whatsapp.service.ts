@@ -2,6 +2,7 @@ import { env, hasWhatsAppConfig } from '../../config/env';
 import { Conversation } from '../../database/models/conversation.model';
 import { Customer } from '../../database/models/customer.model';
 import { ApiError } from '../../utils/api-error';
+import { serviceWindowQuery } from './service-window';
 
 type WhatsAppApiError = {
   message?: string;
@@ -23,6 +24,13 @@ type InteractiveRow = { id: string; title: string; description?: string };
 type ProductCatalogSection = { title: string; product_items: Array<{ product_retailer_id: string }> };
 
 function metaApiError(error: WhatsAppApiError | undefined): ApiError {
+  if (error?.code === 131047) {
+    return new ApiError(
+      409,
+      'Meta rejected this message because the 24-hour customer service window has expired. Send an approved WhatsApp template to reopen the conversation.',
+      'SERVICE_WINDOW_EXPIRED',
+    );
+  }
   if (error?.code === 200 && error.message?.includes('Cannot call API for app')) {
     return new ApiError(
       502,
@@ -87,12 +95,14 @@ export class WhatsAppService {
   }
 
   private async assertServiceWindow(to: string): Promise<void> {
-    const customer = await Customer.findOne({ $or: [{ phoneNumber: to }, { whatsappId: to }] }).select('_id');
-    const conversation = customer
+    const customers = await Customer.find({ $or: [{ phoneNumber: to }, { whatsappId: to }] })
+      .select('_id')
+      .lean();
+    const conversation = customers.length
       ? await Conversation.findOne({
-          customerId: customer._id,
+          customerId: { $in: customers.map((customer) => customer._id) },
           status: { $in: ['OPEN', 'HUMAN_HANDOVER'] },
-          lastInteractionAt: { $gt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+          ...serviceWindowQuery(),
         }).select('_id')
       : null;
     if (!conversation) {

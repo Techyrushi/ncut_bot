@@ -6,6 +6,7 @@ import { MessageTemplate } from '../../database/models/message-template.model';
 import { logger } from '../../config/logger';
 import { recordSystemActivity } from '../logs/activity-log';
 import { whatsappService } from '../whatsapp/whatsapp.service';
+import { serviceWindowQuery } from '../whatsapp/service-window';
 
 let workerBusy = false;
 let lastRecoveryAt = 0;
@@ -131,8 +132,8 @@ async function processOneRecipient(): Promise<void> {
     let conversation = await Conversation.findOne({
       customerId: customer._id,
       status: { $in: ['OPEN', 'HUMAN_HANDOVER'] },
-      ...(!template ? { lastInteractionAt: { $gt: new Date(Date.now() - 24 * 60 * 60 * 1000) } } : {}),
-    }).sort({ lastInteractionAt: -1 });
+      ...(!template ? serviceWindowQuery() : {}),
+    }).sort({ lastInboundMessageAt: -1 });
     if (!conversation && !template) {
       await BulkCampaignRecipient.updateOne(
         { _id: recipient._id },

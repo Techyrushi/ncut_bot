@@ -6,6 +6,7 @@ import { WebhookEvent } from '../../database/models/webhook-event.model';
 import { Message } from '../../database/models/message.model';
 import { BulkCampaignRecipient } from '../../database/models/bulk-campaign.model';
 import { automationService } from '../automation/automation.service';
+import { parseWhatsAppTimestamp } from '../whatsapp/service-window';
 
 type WebhookChange = {
   value?: {
@@ -104,8 +105,10 @@ async function processStatus(payload: Record<string, unknown>): Promise<void> {
     const recipient = await BulkCampaignRecipient.findOne({ whatsappMessageId: messageId });
     if (!recipient) throw new Error(`Status update for message ${messageId} arrived before its local message record`);
     const recipientUpdate: Record<string, unknown> = { status: status.toUpperCase() };
-    const eventTimestamp = typeof payload.timestamp === 'string' ? Number(payload.timestamp) * 1000 : Date.now();
-    const receivedAt = Number.isFinite(eventTimestamp) ? new Date(eventTimestamp) : new Date();
+    const receivedAt =
+      typeof payload.timestamp === 'string' || typeof payload.timestamp === 'number'
+        ? parseWhatsAppTimestamp(payload.timestamp)
+        : new Date();
     if (status === 'delivered') recipientUpdate.deliveredAt = receivedAt;
     if (status === 'read') recipientUpdate.readAt = receivedAt;
     if (status === 'failed') {
@@ -129,8 +132,10 @@ async function processStatus(payload: Record<string, unknown>): Promise<void> {
   if (message.bulkRecipientId) {
     const effectiveStatus = String(message.status);
     const update: Record<string, unknown> = { status: effectiveStatus };
-    const eventTimestamp = typeof payload.timestamp === 'string' ? Number(payload.timestamp) * 1000 : Date.now();
-    const receivedAt = Number.isFinite(eventTimestamp) ? new Date(eventTimestamp) : new Date();
+    const receivedAt =
+      typeof payload.timestamp === 'string' || typeof payload.timestamp === 'number'
+        ? parseWhatsAppTimestamp(payload.timestamp)
+        : new Date();
     if (status.toUpperCase() === effectiveStatus && effectiveStatus === 'DELIVERED') update.deliveredAt = receivedAt;
     if (status.toUpperCase() === effectiveStatus && effectiveStatus === 'READ') update.readAt = receivedAt;
     if (status.toUpperCase() === effectiveStatus && effectiveStatus === 'FAILED') {

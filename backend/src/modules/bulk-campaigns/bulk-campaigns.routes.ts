@@ -11,6 +11,7 @@ import { BulkCampaign, BulkCampaignRecipient } from '../../database/models/bulk-
 import { Conversation } from '../../database/models/conversation.model';
 import { Customer } from '../../database/models/customer.model';
 import { MessageTemplate } from '../../database/models/message-template.model';
+import { serviceWindowQuery } from '../whatsapp/service-window';
 import { authenticate, requireRoles, type AuthenticatedRequest } from '../../middleware/auth';
 import { finalizeCancelledCampaigns } from './bulk-campaign.service';
 import { recordActivity } from '../logs/activity-log';
@@ -214,7 +215,7 @@ async function assessRecipients(campaignId: Types.ObjectId, rows: ParsedRow[], h
     ? await Conversation.find({
         customerId: { $in: customerIds },
         status: { $in: ['OPEN', 'HUMAN_HANDOVER'] },
-        lastInteractionAt: { $gt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+        ...serviceWindowQuery(),
       })
         .select('customerId')
         .lean()
@@ -383,7 +384,7 @@ async function recordCampaignRecipientOptIn(
         await Conversation.exists({
           customerId: customer._id,
           status: { $in: ['OPEN', 'HUMAN_HANDOVER'] },
-          lastInteractionAt: { $gt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+          ...serviceWindowQuery(),
         }),
       );
   const eligible = Boolean(hasApprovedTemplate || activeConversation);
@@ -912,7 +913,7 @@ bulkCampaignsRouter.post(
       const activeCustomers = await Conversation.distinct('customerId', {
         customerId: { $in: customerIds },
         status: { $in: ['OPEN', 'HUMAN_HANDOVER'] },
-        lastInteractionAt: { $gt: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+        ...serviceWindowQuery(),
       });
       activeConversationCustomerIds = new Set(activeCustomers.map(String));
     }
