@@ -9,8 +9,8 @@ self.addEventListener('push', (event) => {
   const title = typeof payload.title === 'string' ? payload.title : 'Ncut notification';
   const options = {
     body: typeof payload.body === 'string' ? payload.body : 'You have a new notification.',
-    icon: '/favicon.svg',
-    badge: '/favicon.svg',
+    icon: '/ncut_logo.jpeg',
+    badge: '/ncut_logo.jpeg',
     data: { url: typeof payload.url === 'string' ? payload.url : '/' },
   };
   event.waitUntil(self.registration.showNotification(title, options));
