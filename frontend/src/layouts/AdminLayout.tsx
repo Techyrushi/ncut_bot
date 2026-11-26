@@ -55,8 +55,9 @@ export function AdminLayout() {
 
     let active = true;
     void navigator.serviceWorker
-      .register('/service-worker.js')
+      .register('/service-worker.js', { updateViaCache: 'none' })
       .then(async (registration) => {
+        await registration.update();
         const { data } = await api.get<ApiResponse<{ enabled: boolean }>>('/push/configuration');
         if (!active) return;
         if (!data.data.enabled) {
@@ -305,8 +306,13 @@ export function AdminLayout() {
   );
 }
 
-function decodeVapidPublicKey(value: string): Uint8Array {
+function decodeVapidPublicKey(value: string): ArrayBuffer {
   const padded = value + '='.repeat((4 - (value.length % 4)) % 4);
   const decoded = atob(padded.replace(/-/g, '+').replace(/_/g, '/'));
-  return Uint8Array.from(decoded, (character) => character.charCodeAt(0));
+  const buffer = new ArrayBuffer(decoded.length);
+  const bytes = new Uint8Array(buffer);
+  for (let index = 0; index < decoded.length; index += 1) {
+    bytes[index] = decoded.charCodeAt(index);
+  }
+  return buffer;
 }
