@@ -1,0 +1,17 @@
+{
+  "name": "N-CUT Abrasives Sales Console",
+  "short_name": "N-CUT",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#101a30",
+  "theme_color": "#101a30",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

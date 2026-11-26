@@ -6,7 +6,7 @@ import { DashboardPage } from './pages/DashboardPage';
 import { LoginPage } from './pages/LoginPage';
 import { ProductsPage } from './pages/ProductsPage';
 import { RecordsPage } from './pages/RecordsPage';
-import { ConversationsPage, LeadsPage, TeamPage, TemplatesPage } from './pages/OperationsPages';
+import { ConversationsPage, LeadNotificationPage, LeadsPage, TeamPage, TemplatesPage } from './pages/OperationsPages';
 import { AutomationSettingsPage, WhatsAppSetupPage } from './pages/UtilityPages';
 import { SystemLogsPage } from './pages/SystemLogsPage';
 import { ProtectedRoute } from './components/ProtectedRoute';
@@ -33,6 +33,7 @@ export default function App() {
                 <Route path="conversations" element={<ConversationsPage />} />
                 <Route path="bulk-campaigns" element={<BulkCampaignsPage />} />
                 <Route path="leads" element={<LeadsPage />} />
+                <Route path="leads/:id" element={<LeadNotificationPage />} />
                 <Route path="sales-team" element={<TeamPage />} />
                 <Route path="templates" element={<TemplatesPage />} />
                 <Route path="whatsapp" element={<WhatsAppSetupPage />} />

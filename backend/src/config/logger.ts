@@ -10,6 +10,7 @@ export const logger = pino({
     'req.query',
     'req.url',
     '*.WHATSAPP_ACCESS_TOKEN',
+    '*.ADMIN_WHATSAPP_NUMBER',
     '*.JWT_SECRET',
   ],
 });

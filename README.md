@@ -90,13 +90,18 @@ On startup the backend validates required configuration, connects to MongoDB, an
 | `JWT_SECRET`                     |         Yes | JWT signing secret, minimum 32 characters          |
 | `JWT_EXPIRES_IN`                 |          No | Token lifetime, default `1d`                       |
 | `FRONTEND_URL`                   |          No | Exact allowed browser origin                       |
-| `SALES_NOTIFICATION_PROVIDER`    |          No | `log` or `webhook`                                 |
+| `SALES_NOTIFICATION_PROVIDER`    |          No | `log`, `webhook`, or `whatsapp`                    |
 | `SALES_NOTIFICATION_TARGET`      | Conditional | HTTPS notification receiver for `webhook` provider |
+| `ADMIN_WHATSAPP_NUMBER`          | Conditional | International-format admin recipient for `whatsapp` provider |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` |          No | First administrator bootstrap pair                 |
 | `WEBHOOK_PROCESSING_INTERVAL_MS` |          No | Worker polling period                              |
 | `WEBHOOK_MAX_ATTEMPTS`           |          No | Failed event retry limit                           |
 
 Set the public frontend `VITE_API_URL` in `frontend/.env.local` (see `frontend/.env.example`). Meta credentials are optional in development and tests. The WhatsApp service returns an explicit configuration error if a message is attempted without them. All Meta settings are required in production. Never expose `WHATSAPP_ACCESS_TOKEN` to Vite or the browser. The phone number ID is the numeric ID shown in Meta's API setup, not the displayed test phone number.
+
+To send internal admin alerts for every distinct inbound WhatsApp message with Meta Direct Send, set `SALES_NOTIFICATION_PROVIDER=whatsapp`, `ADMIN_WHATSAPP_NUMBER` to the admin's full international number (digits with optional leading `+`; for the supplied Indian mobile, prefix `91`), and `FRONTEND_URL` to the public HTTPS dashboard domain. The backend uses its existing `WHATSAPP_ACCESS_TOKEN` and `WHATSAPP_PHONE_NUMBER_ID`. Meta Direct Send accepts utility messages without a pre-created template; Meta handles template matching and creation. API acceptance is stored separately from delivery status received through the WhatsApp status webhook. Each alert links to the authenticated dashboard conversation.
+
+Admins can also enable background browser push alerts for inbound WhatsApp messages on desktop and supported mobile browsers. Generate a VAPID key pair with `npx web-push generate-vapid-keys`, set `WEB_PUSH_VAPID_PUBLIC_KEY` and `WEB_PUSH_VAPID_PRIVATE_KEY` in the backend environment, and set `WEB_PUSH_VAPID_SUBJECT` to the public HTTPS site URL (for example, `https://ncut-app.ssdit.in`). Keep the private key server-side. Rebuild/restart the backend and frontend, sign in as an admin, and choose **Enable alerts** in the top bar on each browser/device. The browser must grant notification permission; iPhone/iPad users need to install the site to the Home Screen and use a supported iOS version. Web Push relays through browser-vendor push services; no paid notification provider account is used.
 
 ## Catalogue and automation data
 

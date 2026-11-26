@@ -60,8 +60,8 @@ export class WhatsAppService {
     return `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}/${env.WHATSAPP_PHONE_NUMBER_ID}/messages`;
   }
 
-  private async send(to: string, message: Record<string, unknown>): Promise<string> {
-    if (message.type !== 'template') await this.assertServiceWindow(to);
+  private async send(to: string, message: Record<string, unknown>, skipServiceWindow = false): Promise<string> {
+    if (!skipServiceWindow && message.type !== 'template') await this.assertServiceWindow(to);
     const response = await fetch(this.endpoint, {
       method: 'POST',
       headers: {
@@ -292,6 +292,45 @@ export class WhatsAppService {
     return this.send(to, {
       type: 'template',
       template: { name, language: { code: languageCode }, ...(components ? { components } : {}) },
+    });
+  }
+
+  sendDirectNotification(to: string, title: string, body: string, url: string): Promise<string> {
+    let destination: URL;
+    try {
+      destination = new URL(url);
+    } catch {
+      throw new ApiError(400, 'Admin notification URL must be a valid HTTPS URL', 'INVALID_NOTIFICATION_URL');
+    }
+    if (destination.protocol !== 'https:' || !title.trim() || title.length > 60 || !body.trim() || body.length > 1024) {
+      throw new ApiError(400, 'Admin notification content or HTTPS URL is invalid', 'INVALID_DIRECT_SEND_MESSAGE');
+    }
+    const recipient = to.replace(/^\+/, '');
+    return this.send(
+      recipient,
+      {
+        type: 'interactive',
+        category: 'utility',
+        interactive: {
+          type: 'cta_url',
+          header: { type: 'text', text: title },
+          body: { text: body },
+          action: {
+            name: 'cta_url',
+            parameters: { display_text: 'View Notification', url: destination.toString() },
+          },
+        },
+      },
+      true,
+    ).catch((error: unknown) => {
+      if (!(error instanceof Error)) throw error;
+      const safeMessage = [...new Set([to, recipient, `+${recipient}`])].reduce(
+        (message, phone) => message.replaceAll(phone, '[redacted phone number]'),
+        error.message,
+      );
+      if (safeMessage === error.message) throw error;
+      if (error instanceof ApiError) throw new ApiError(error.statusCode, safeMessage, error.code);
+      throw new ApiError(502, safeMessage, 'WHATSAPP_API_ERROR');
     });
   }
 

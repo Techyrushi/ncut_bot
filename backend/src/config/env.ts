@@ -28,17 +28,60 @@ const schema = z
     JWT_SECRET: z.string().min(32, 'JWT_SECRET must contain at least 32 characters'),
     JWT_EXPIRES_IN: z.string().default('1d'),
     FRONTEND_URL: z.string().url().default('http://localhost:5173'),
-    SALES_NOTIFICATION_PROVIDER: z.enum(['log', 'webhook']).default('log'),
+    SALES_NOTIFICATION_PROVIDER: z.enum(['log', 'webhook', 'whatsapp']).default('log'),
     SALES_NOTIFICATION_TARGET: z.preprocess(
       (value) => (value === '' ? undefined : value),
       z.string().url().optional().default(''),
     ),
+    ADMIN_WHATSAPP_NUMBER: z.preprocess(
+      (value) => (typeof value === 'string' ? value.trim() || undefined : value),
+      z.string().regex(/^\+?[1-9]\d{6,14}$/).optional().default(''),
+    ),
+    WEB_PUSH_VAPID_PUBLIC_KEY: optionalSecret,
+    WEB_PUSH_VAPID_PRIVATE_KEY: optionalSecret,
+    WEB_PUSH_VAPID_SUBJECT: z.string().url().default('https://ncut-app.ssdit.in'),
     ADMIN_EMAIL: z.preprocess((value) => (value === '' ? undefined : value), z.string().email().optional()),
     ADMIN_PASSWORD: optionalSecret,
     WEBHOOK_PROCESSING_INTERVAL_MS: z.coerce.number().int().positive().default(1000),
     WEBHOOK_MAX_ATTEMPTS: z.coerce.number().int().positive().default(8),
   })
   .superRefine((config, context) => {
+    const webPushValues = [
+      config.WEB_PUSH_VAPID_PUBLIC_KEY,
+      config.WEB_PUSH_VAPID_PRIVATE_KEY,
+    ];
+    if (webPushValues.some(Boolean) && webPushValues.some((value) => !value)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['WEB_PUSH_VAPID_PUBLIC_KEY'],
+        message: 'WEB_PUSH_VAPID_PUBLIC_KEY and WEB_PUSH_VAPID_PRIVATE_KEY must be configured together',
+      });
+    }
+    if (config.SALES_NOTIFICATION_PROVIDER === 'whatsapp') {
+      for (const key of ['WHATSAPP_ACCESS_TOKEN', 'WHATSAPP_PHONE_NUMBER_ID'] as const) {
+        if (!config[key]) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [key],
+            message: `is required when WhatsApp admin notifications are enabled`,
+          });
+        }
+      }
+      if (!config.ADMIN_WHATSAPP_NUMBER) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['ADMIN_WHATSAPP_NUMBER'],
+          message: 'is required when WhatsApp admin notifications are enabled',
+        });
+      }
+      if (!config.FRONTEND_URL.startsWith('https://')) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['FRONTEND_URL'],
+          message: 'must use HTTPS when WhatsApp admin notifications are enabled',
+        });
+      }
+    }
     if (config.NODE_ENV === 'production') {
       if (!config.APP_URL.startsWith('https://')) {
         context.addIssue({

@@ -2599,6 +2599,40 @@ td {
   font-size: 10px;
   margin-top: 5px;
 }
+.push-notification-toggle {
+  min-height: 34px;
+  padding: 0 11px;
+  border: 1px solid #dfe4ec;
+  border-radius: 9px;
+  background: #fff;
+  color: #27324b;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.push-notification-toggle:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin: 0;
+}
+.detail-grid > div {
+  min-width: 0;
+}
+.detail-grid dt {
+  color: #8992a3;
+  font-size: 11px;
+  font-weight: 700;
+  margin-bottom: 5px;
+}
+.detail-grid dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
 .conversation-back {
   display: none;
   border: 0;

@@ -13,6 +13,7 @@ import { env } from '../src/config/env';
 import { automationService } from '../src/modules/automation/automation.service';
 import { processPendingWebhookEvents, verifySignature } from '../src/modules/webhook/webhook.processor';
 import { whatsappService } from '../src/modules/whatsapp/whatsapp.service';
+import { webPushService } from '../src/modules/push/web-push.service';
 
 let mongo: MongoMemoryServer;
 
@@ -784,6 +785,118 @@ describe('catalogue automation', () => {
       requirement: 'Customer asked to connect with the sales team',
     });
     expect(await Lead.countDocuments({ conversationId: conversation?._id })).toBe(1);
+  });
+
+  it('sends one Direct Send admin alert for each distinct inbound message', async () => {
+    const previousProvider = env.SALES_NOTIFICATION_PROVIDER;
+    const previousAdminNumber = env.ADMIN_WHATSAPP_NUMBER;
+    const previousFrontendUrl = env.FRONTEND_URL;
+    const previousVapidPublicKey = env.WEB_PUSH_VAPID_PUBLIC_KEY;
+    const previousVapidPrivateKey = env.WEB_PUSH_VAPID_PRIVATE_KEY;
+    env.SALES_NOTIFICATION_PROVIDER = 'whatsapp';
+    env.ADMIN_WHATSAPP_NUMBER = '+919999999999';
+    env.FRONTEND_URL = 'https://dashboard.ncut.test';
+    env.WEB_PUSH_VAPID_PUBLIC_KEY = 'test-public-key';
+    env.WEB_PUSH_VAPID_PRIVATE_KEY = 'test-private-key';
+    const pushMock = jest.spyOn(webPushService, 'notifyAdmins').mockResolvedValue({ attempted: 1, accepted: 1 });
+    const requests: Array<{ url: string; payload: Record<string, unknown>; messageId: string }> = [];
+    let counter = 0;
+    jest.spyOn(global, 'fetch').mockImplementation(async (input, init) => {
+      const payload =
+        typeof init?.body === 'string' ? (JSON.parse(init.body) as Record<string, unknown>) : {};
+      const messageId = `wamid.direct.${++counter}`;
+      requests.push({ url: String(input), payload, messageId });
+      return new Response(JSON.stringify({ messages: [{ id: messageId }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const inbound = {
+      id: 'msg-admin-notification',
+      from: '15550003332',
+      timestamp: String(Math.floor(Date.now() / 1000)),
+      type: 'text',
+      text: { body: 'Please call me about the flap discs.' },
+    };
+
+    try {
+      await automationService.processIncoming(inbound);
+      const directSend = requests.find(({ payload }) => payload.category === 'utility');
+      if (!directSend) throw new Error('Expected one mocked Direct Send request');
+      expect(directSend.url).toBe('https://graph.facebook.com/v27.0/123456789/messages');
+      expect(directSend.payload).toMatchObject({
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: '919999999999',
+        type: 'interactive',
+        category: 'utility',
+        interactive: {
+          type: 'cta_url',
+          header: { type: 'text', text: 'Ncut Admin Notification' },
+          body: {
+            text: 'Hello Admin,\n\nIncoming WhatsApp message\nCustomer: Please call me about the flap discs.\n\nOpen the notification to review the details in your Ncut dashboard.',
+          },
+          action: {
+            name: 'cta_url',
+            parameters: {
+              display_text: 'View Notification',
+              url: expect.stringMatching(/^https:\/\/dashboard\.ncut\.test\/conversations\?conversation=/),
+            },
+          },
+        },
+      });
+      const inboundRecord = await Message.findOne({ whatsappMessageId: inbound.id });
+      expect(inboundRecord).toMatchObject({
+        adminNotificationStatus: 'ACCEPTED',
+        adminNotificationMessageId: directSend.messageId,
+        webPushStatus: 'ACCEPTED',
+      });
+      expect(pushMock).toHaveBeenCalledWith({
+        title: 'Ncut Admin Notification',
+        body: 'Customer: Please call me about the flap discs.',
+        url: expect.stringMatching(/^https:\/\/dashboard\.ncut\.test\/conversations\?conversation=/),
+      });
+
+      await markDelivered(directSend.messageId);
+      expect(await Message.findById(inboundRecord?._id)).toMatchObject({
+        adminNotificationStatus: 'ACCEPTED',
+        adminNotificationDeliveryStatus: 'DELIVERED',
+      });
+
+      const notificationRequestCount = requests.filter(({ payload }) => payload.category === 'utility').length;
+      await automationService.processIncoming(inbound);
+      expect(requests.filter(({ payload }) => payload.category === 'utility')).toHaveLength(notificationRequestCount);
+
+      await automationService.processIncoming({
+        ...inbound,
+        id: 'msg-admin-notification-second',
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        text: { body: 'Can you share product details?' },
+      });
+      const notifications = requests.filter(({ payload }) => payload.category === 'utility');
+      expect(notifications).toHaveLength(notificationRequestCount + 1);
+      expect(notifications.at(-1)?.payload).toMatchObject({
+        to: '919999999999',
+        category: 'utility',
+        interactive: {
+          body: {
+            text: expect.stringContaining('Customer: Can you share product details?'),
+          },
+        },
+      });
+      expect(pushMock).toHaveBeenCalledTimes(2);
+      expect(pushMock).toHaveBeenLastCalledWith({
+        title: 'Ncut Admin Notification',
+        body: 'Customer: Can you share product details?',
+        url: expect.stringMatching(/^https:\/\/dashboard\.ncut\.test\/conversations\?conversation=/),
+      });
+    } finally {
+      env.SALES_NOTIFICATION_PROVIDER = previousProvider;
+      env.ADMIN_WHATSAPP_NUMBER = previousAdminNumber;
+      env.FRONTEND_URL = previousFrontendUrl;
+      env.WEB_PUSH_VAPID_PUBLIC_KEY = previousVapidPublicKey;
+      env.WEB_PUSH_VAPID_PRIVATE_KEY = previousVapidPrivateKey;
+    }
   });
 
   it('offers post-handover options and records lead feedback', async () => {

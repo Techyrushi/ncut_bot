@@ -1,6 +1,6 @@
 import { useDeferredValue, useEffect, useRef, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, Navigate, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { api } from '../services/api';
 import type { ApiResponse, PageResult } from '../types/api';
 import { useAuth } from '../contexts/AuthContext';
@@ -694,9 +694,12 @@ export function LeadsPage() {
                     </span>
                   </td>
                   <td>
-                    <span className={`status-chip ${lead.notificationStatus === 'SENT' ? 'on' : 'off'}`}>
+                    <span className={`status-chip ${['SENT', 'ACCEPTED'].includes(String(lead.notificationStatus)) ? 'on' : 'off'}`}>
                       {String(lead.notificationStatus ?? 'PENDING')}
                     </span>
+                    {typeof lead.notificationDeliveryStatus === 'string' && (
+                      <small className="small muted">Delivery: {String(lead.notificationDeliveryStatus)}</small>
+                    )}
                   </td>
                   <td>{formatDate(lead.createdAt)}</td>
                   <td>
@@ -825,6 +828,67 @@ export function LeadsPage() {
             )}
           </section>
         </div>
+      )}
+    </div>
+  );
+}
+
+export function LeadNotificationPage() {
+  const { id = '' } = useParams();
+  const { user } = useAuth();
+  const lead = useQuery({
+    queryKey: ['lead', id],
+    enabled: user?.role === 'ADMIN' && Boolean(id),
+    queryFn: async () => (await api.get<ApiResponse<BasicRecord>>(`/leads/${id}`)).data.data,
+  });
+
+  if (user?.role !== 'ADMIN') return <Navigate to="/leads" replace />;
+
+  return (
+    <div className="page-stack">
+      <div className="page-heading">
+        <div>
+          <div className="eyebrow">SALES / LEAD NOTIFICATION</div>
+          <h1>New sales lead</h1>
+          <p>Review the customer request and follow-up details.</p>
+        </div>
+        <Link to="/leads" className="secondary-button">All leads</Link>
+      </div>
+      {lead.isLoading && <div className="empty-row">Loading lead…</div>}
+      {lead.isError && (
+        <div className="alert error" role="alert">
+          {lead.error instanceof Error ? lead.error.message : 'Unable to load this lead.'}
+        </div>
+      )}
+      {lead.data && (
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <div className="eyebrow">CUSTOMER</div>
+              <h2>{display(lead.data.customerId)}</h2>
+              <span className="contact-subtitle">{customerPhone(lead.data.customerId) || 'WhatsApp number unavailable'}</span>
+            </div>
+            <span className="status-chip on">{String(lead.data.status)}</span>
+          </div>
+          <dl className="detail-grid">
+            <div>
+              <dt>Customer request</dt>
+              <dd>{String(lead.data.requirement || 'Not provided')}</dd>
+            </div>
+            <div>
+              <dt>Interested products</dt>
+              <dd>{displayMany(lead.data.selectedProducts)}</dd>
+            </div>
+            <div>
+              <dt>Assigned sales representative</dt>
+              <dd>{display(lead.data.assignedSalesPerson)}</dd>
+            </div>
+            <div>
+              <dt>Created</dt>
+              <dd>{formatDate(lead.data.createdAt)}</dd>
+            </div>
+          </dl>
+        </section>
       )}
     </div>
   );
@@ -1261,7 +1325,7 @@ export function ConversationsPage() {
               <div ref={messageEndRef} />
             </div>
           )}
-          {selected && selected.status !== 'CLOSED' && (
+          {selected && (
             <section className="message-composer">
               {serviceWindowOpen ? (
                 <form onSubmit={submitReply}>

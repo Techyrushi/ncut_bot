@@ -317,7 +317,7 @@ leadsRouter.patch(
 leadsRouter.get(
   '/:id',
   authenticate,
-  requireRoles('ADMIN', 'SALES'),
+  requireRoles('ADMIN'),
   asyncHandler(async (req, res) => {
     const lead = await Lead.findById(req.params.id)
       .populate('customerId', 'profileName name phoneNumber')

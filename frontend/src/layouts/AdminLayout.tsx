@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type MouseEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../contexts/AuthContext';
@@ -24,6 +24,8 @@ export function AdminLayout() {
   const navigate = useNavigate();
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [notificationFlash, setNotificationFlash] = useState(false);
+  const [pushState, setPushState] = useState<'checking' | 'ready' | 'subscribed' | 'unsupported' | 'disabled' | 'error'>('checking');
+  const [pushBusy, setPushBusy] = useState(false);
   const previousUnread = useRef<number | null>(null);
   const channel = useQuery({
     queryKey: ['whatsapp-config'],
@@ -44,6 +46,70 @@ export function AdminLayout() {
     refetchInterval: 10000,
     refetchOnWindowFocus: true,
   });
+  useEffect(() => {
+    if (user?.role !== 'ADMIN') return;
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+      setPushState('unsupported');
+      return;
+    }
+
+    let active = true;
+    void navigator.serviceWorker
+      .register('/service-worker.js')
+      .then(async (registration) => {
+        const { data } = await api.get<ApiResponse<{ enabled: boolean }>>('/push/configuration');
+        if (!active) return;
+        if (!data.data.enabled) {
+          setPushState('disabled');
+          return;
+        }
+        const subscription = await registration.pushManager.getSubscription();
+        setPushState(subscription ? 'subscribed' : 'ready');
+      })
+      .catch(() => {
+        if (active) setPushState('error');
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [user?.role]);
+
+  async function togglePushNotifications(event: MouseEvent<HTMLButtonElement>): Promise<void> {
+    event.preventDefault();
+    if (pushBusy) return;
+    setPushBusy(true);
+    try {
+      const { data } = await api.get<ApiResponse<{ enabled: boolean; publicKey: string }>>('/push/configuration');
+      if (!data.data.enabled || !data.data.publicKey) {
+        setPushState('disabled');
+        return;
+      }
+      const registration = await navigator.serviceWorker.ready;
+      const current = await registration.pushManager.getSubscription();
+      if (current) {
+        await api.delete('/push/subscriptions', { data: { endpoint: current.endpoint } });
+        await current.unsubscribe();
+        setPushState('ready');
+        return;
+      }
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        setPushState(permission === 'denied' ? 'error' : 'ready');
+        return;
+      }
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: decodeVapidPublicKey(data.data.publicKey),
+      });
+      await api.post('/push/subscriptions', subscription.toJSON());
+      setPushState('subscribed');
+    } catch {
+      setPushState('error');
+    } finally {
+      setPushBusy(false);
+    }
+  }
   const unread = (conversations.data ?? []).filter((item) => Number(item.unreadCount ?? 0) > 0);
   const unreadTotal = unread.reduce((sum, item) => sum + Number(item.unreadCount ?? 0), 0);
   useEffect(() => {
@@ -123,6 +189,29 @@ export function AdminLayout() {
                 : 'Setup needed'}
             <span className="topbar-separator">•</span>{' '}
             {new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+            {user?.role === 'ADMIN' && pushState !== 'unsupported' && pushState !== 'disabled' && (
+              <button
+                type="button"
+                className="push-notification-toggle"
+                onClick={togglePushNotifications}
+                disabled={pushBusy || pushState === 'checking'}
+                title={
+                  pushState === 'error'
+                    ? 'Push notifications need browser permission and HTTPS'
+                    : pushState === 'subscribed'
+                      ? 'Turn off background notifications'
+                      : 'Enable background notifications'
+                }
+              >
+                {pushBusy || pushState === 'checking'
+                  ? 'Checking alerts…'
+                  : pushState === 'subscribed'
+                    ? 'Alerts on'
+                    : pushState === 'error'
+                      ? 'Alerts unavailable'
+                      : 'Enable alerts'}
+              </button>
+            )}
             <div className="notification-menu">
               <button
                 type="button"
@@ -214,4 +303,10 @@ export function AdminLayout() {
       </main>
     </div>
   );
+}
+
+function decodeVapidPublicKey(value: string): Uint8Array {
+  const padded = value + '='.repeat((4 - (value.length % 4)) % 4);
+  const decoded = atob(padded.replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(decoded, (character) => character.charCodeAt(0));
 }

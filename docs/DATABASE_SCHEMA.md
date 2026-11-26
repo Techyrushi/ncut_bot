@@ -29,14 +29,14 @@ All timestamps are UTC dates. Mongoose `timestamps` adds `createdAt` and `update
 
 ## Message
 
-`customerId`, `conversationId`, optional unique/sparse `whatsappMessageId`, `direction` (`INBOUND | OUTBOUND`), `messageType`, `content`, `status` (`RECEIVED | QUEUED | SENT | DELIVERED | READ | FAILED`), `timestamp`, optional provider error.
+`customerId`, `conversationId`, optional unique/sparse `whatsappMessageId`, `direction` (`INBOUND | OUTBOUND`), `messageType`, `content`, `status` (`RECEIVED | QUEUED | SENT | DELIVERED | READ | FAILED`), `timestamp`, optional provider error, and optional admin notification acceptance/message/delivery status for inbound alerts.
 
 - Conversation/time descending index supports conversation history.
 - Provider message ID is sparse unique so inbound webhook replays and status updates are associated safely.
 
 ## Lead
 
-`customerId`, unique-per-conversation relationship, `selectedProducts`, optional `assignedSalesPerson`, status (`NEW | CONTACTED | QUALIFIED | WON | LOST`), `notificationStatus`, `notificationSentAt`, and optional requirement.
+`customerId`, unique-per-conversation relationship, `selectedProducts`, optional `assignedSalesPerson`, status (`NEW | CONTACTED | QUALIFIED | WON | LOST`), notification API acceptance status and timestamp, optional WhatsApp notification message ID and delivery status, and optional requirement.
 
 - Status/creation and assignee indexes support work queues.
 - Lead history is the related `Message` set for its `conversationId`; messages are not duplicated into a lead document.
@@ -53,6 +53,10 @@ All timestamps are UTC dates. Mongoose `timestamps` adds `createdAt` and `update
 ## WorkspaceSettings
 
 Single `workspace` record with public business phone number, configurable welcome text, and the administrator that last changed it. It does not contain Meta credentials.
+
+## PushSubscription
+
+Stores one Web Push endpoint and encryption keys per browser subscription, associated with its authenticated administrator. The unique endpoint index supports idempotent registration; expired subscriptions are removed after the push service reports them gone.
 
 ## ActivityLog
 

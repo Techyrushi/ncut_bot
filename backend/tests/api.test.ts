@@ -19,10 +19,12 @@ import { MessageTemplate } from '../src/database/models/message-template.model';
 import { ActivityLog } from '../src/database/models/activity-log.model';
 import { BulkCampaign, BulkCampaignRecipient } from '../src/database/models/bulk-campaign.model';
 import { WebhookEvent } from '../src/database/models/webhook-event.model';
+import { PushSubscription } from '../src/database/models/push-subscription.model';
 import { env } from '../src/config/env';
 import { enqueueWebhookPayload, processPendingWebhookEvents } from '../src/modules/webhook/webhook.processor';
 import { processBulkCampaignQueue } from '../src/modules/bulk-campaigns/bulk-campaign.service';
 import { whatsappService } from '../src/modules/whatsapp/whatsapp.service';
+import * as webPushServiceModule from '../src/modules/push/web-push.service';
 
 let mongo: MongoMemoryServer;
 
@@ -51,6 +53,7 @@ beforeAll(async () => {
     BulkCampaign.init(),
     BulkCampaignRecipient.init(),
     WebhookEvent.init(),
+    PushSubscription.init(),
   ]);
 });
 
@@ -68,6 +71,7 @@ afterEach(async () => {
     BulkCampaign.deleteMany({}),
     BulkCampaignRecipient.deleteMany({}),
     WebhookEvent.deleteMany({}),
+    PushSubscription.deleteMany({}),
   ]);
   jest.restoreAllMocks();
 });
@@ -612,6 +616,11 @@ it('filters and exports accurate lead data and supports status and assignment ch
     jwtid: randomUUID(),
     expiresIn: '1h',
   });
+  const salesToken = jwt.sign({ role: sales!.role, ver: sales!.authVersion ?? 0 }, env.JWT_SECRET, {
+    subject: sales!.id,
+    jwtid: randomUUID(),
+    expiresIn: '1h',
+  });
   const [customer, otherCustomer] = await Customer.create([
     { whatsappId: '15550001116', phoneNumber: '15550001116', profileName: 'Rushikesh Customer' },
     { whatsappId: '15550001117', phoneNumber: '15550001117', profileName: 'Other Customer' },
@@ -658,6 +667,9 @@ it('filters and exports accurate lead data and supports status and assignment ch
     selectedProducts: [{ name: 'Flap Disc' }],
     assignedSalesPerson: { name: 'Sales Rep', isActive: true },
   });
+  expect((await request(app).get(`/api/v1/leads/${lead.id}`).set('authorization', `Bearer ${token}`)).status).toBe(200);
+  expect((await request(app).get(`/api/v1/leads/${lead.id}`).set('authorization', `Bearer ${salesToken}`)).status).toBe(403);
+  expect((await request(app).get(`/api/v1/leads/${lead.id}`)).status).toBe(401);
 
   const csv = await request(app)
     .get('/api/v1/leads/export.csv')
@@ -2069,6 +2081,73 @@ it('authenticates, enforces protected routes, and revokes a logged-out JWT', asy
   expect(logout.status).toBe(200);
   const revoked = await request(app).get('/api/v1/dashboard/stats').set('authorization', `Bearer ${token}`);
   expect(revoked.status).toBe(401);
+});
+
+it('restricts Web Push subscriptions to admins and persists the browser endpoint', async () => {
+  const [admin, sales] = await Promise.all([
+    User.create({
+      email: 'admin@example.com',
+      name: 'Admin',
+      passwordHash: await hash('long-test-password', 4),
+      role: 'ADMIN',
+    }),
+    User.create({
+      email: 'sales@example.com',
+      name: 'Sales',
+      passwordHash: await hash('long-test-password', 4),
+      role: 'SALES',
+    }),
+  ]);
+  const tokenFor = (user: typeof admin) =>
+    jwt.sign({ role: user.role, ver: user.authVersion ?? 0 }, env.JWT_SECRET, {
+      subject: user.id,
+      jwtid: randomUUID(),
+      expiresIn: '1h',
+    });
+  const adminToken = tokenFor(admin);
+  const salesToken = tokenFor(sales);
+  const configured = jest.spyOn(webPushServiceModule, 'isWebPushConfigured').mockReturnValue(true);
+  const endpoint = 'https://push.example.test/subscription/opaque-endpoint';
+  const subscription = {
+    endpoint,
+    expirationTime: null,
+    keys: {
+      p256dh: 'a'.repeat(65),
+      auth: 'b'.repeat(16),
+    },
+  };
+
+  const anonymous = await request(app).get('/api/v1/push/configuration');
+  expect(anonymous.status).toBe(401);
+  const unauthorized = await request(app)
+    .get('/api/v1/push/configuration')
+    .set('authorization', `Bearer ${salesToken}`);
+  expect(unauthorized.status).toBe(403);
+
+  const configuration = await request(app)
+    .get('/api/v1/push/configuration')
+    .set('authorization', `Bearer ${adminToken}`);
+  expect(configuration.status).toBe(200);
+  expect(configuration.body.data).toMatchObject({ enabled: true });
+
+  const created = await request(app)
+    .post('/api/v1/push/subscriptions')
+    .set('authorization', `Bearer ${adminToken}`)
+    .send(subscription);
+  expect(created.status).toBe(201);
+  expect(await PushSubscription.findOne({ endpoint }).lean()).toMatchObject({
+    userId: admin._id,
+    endpoint,
+    keys: subscription.keys,
+  });
+
+  const removed = await request(app)
+    .delete('/api/v1/push/subscriptions')
+    .set('authorization', `Bearer ${adminToken}`)
+    .send({ endpoint });
+  expect(removed.status).toBe(200);
+  expect(await PushSubscription.countDocuments({ endpoint })).toBe(0);
+  configured.mockRestore();
 });
 
 it('updates account credentials with the current password and invalidates prior sessions', async () => {

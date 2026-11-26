@@ -9,6 +9,7 @@ import { BulkCampaignRecipient } from '../../database/models/bulk-campaign.model
 import { Product } from '../../database/models/product.model';
 import { DEFAULT_WELCOME_MESSAGE, WorkspaceSettings } from '../../database/models/workspace-settings.model';
 import { whatsappService } from '../whatsapp/whatsapp.service';
+import { webPushService, isWebPushConfigured } from '../push/web-push.service';
 import { parseWhatsAppTimestamp } from '../whatsapp/service-window';
 import { phoneNumberCandidates } from '../customers/phone-number';
 
@@ -257,6 +258,7 @@ export class AutomationService {
     if (!conversation) conversation = await Conversation.findOne({ customerId: customer._id }).sort({ updatedAt: -1 });
     if (conversation?.status === 'HUMAN_HANDOVER') {
       await this.saveInbound(message, customer._id, conversation._id, receivedAt);
+      await this.notifyAdminOfInbound(message, customer, conversation._id);
       await Conversation.updateOne(
         { _id: conversation._id },
         { $max: { lastMessageAt: receivedAt, lastInteractionAt: receivedAt, lastInboundMessageAt: receivedAt } },
@@ -365,6 +367,7 @@ export class AutomationService {
     if (!conversation) throw new Error('Unable to create or locate an active conversation');
 
     await this.saveInbound(message, customer._id, conversation._id, receivedAt);
+    await this.notifyAdminOfInbound(message, customer, conversation._id);
     await Conversation.updateOne(
       { _id: conversation._id },
       { $max: { lastMessageAt: receivedAt, lastInteractionAt: receivedAt, lastInboundMessageAt: receivedAt } },
@@ -463,6 +466,102 @@ export class AutomationService {
       },
       { upsert: true },
     );
+  }
+
+  private async notifyAdminOfInbound(
+    message: IncomingMessage,
+    customer: { _id: Types.ObjectId; profileName?: string | null; name?: string | null },
+    conversationId: Types.ObjectId,
+  ): Promise<void> {
+    const storedMessage = await Message.findOne({ whatsappMessageId: message.id }).select('_id');
+    if (!storedMessage) throw new Error('Unable to locate the stored inbound message for admin notification');
+
+    const customerName = (customer.profileName || customer.name || 'Customer')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 80);
+    const reply = (
+      message.text?.body ??
+      message.image?.caption ??
+      message.interactive?.button_reply?.title ??
+      message.interactive?.list_reply?.title ??
+      message.button?.text ??
+      `[${message.type.toLowerCase()} message]`
+    )
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 600);
+    const body = `Hello Admin,\n\nIncoming WhatsApp message\n${customerName}: ${reply || '[empty message]'}` +
+      '\n\nOpen the notification to review the details in your Ncut dashboard.';
+    const dashboardUrl = new URL('/conversations', env.FRONTEND_URL);
+    dashboardUrl.searchParams.set('conversation', conversationId.toString());
+
+    if (isWebPushConfigured()) {
+      const pushClaim = await Message.findOneAndUpdate(
+        { _id: storedMessage._id, webPushStatus: { $exists: false } },
+        { $set: { webPushStatus: 'SENDING' } },
+        { new: true },
+      );
+      if (pushClaim) {
+        try {
+          const result = await webPushService.notifyAdmins({
+            title: 'NCUT Abrasives Admin Notification',
+            body: `${customerName}: ${reply || '[empty message]'}`,
+            url: dashboardUrl.toString(),
+          });
+          await Message.updateOne(
+            { _id: pushClaim._id, webPushStatus: 'SENDING' },
+            {
+              $set: {
+                webPushStatus:
+                  result.accepted > 0 ? 'ACCEPTED' : result.attempted === 0 ? 'NO_SUBSCRIPTIONS' : 'FAILED',
+              },
+            },
+          );
+        } catch (error) {
+          await Message.updateOne(
+            { _id: pushClaim._id, webPushStatus: 'SENDING' },
+            { $set: { webPushStatus: 'FAILED' } },
+          );
+          logger.error(
+            { err: error, messageId: message.id },
+            'Web Push admin notification failed',
+          );
+        }
+      }
+    }
+
+    if (env.SALES_NOTIFICATION_PROVIDER === 'whatsapp') {
+      const claimed = await Message.findOneAndUpdate(
+        { _id: storedMessage._id, adminNotificationStatus: { $exists: false } },
+        { $set: { adminNotificationStatus: 'SENDING' } },
+        { new: true },
+      );
+      if (!claimed) return;
+      try {
+        const whatsappMessageId = await whatsappService.sendDirectNotification(
+          env.ADMIN_WHATSAPP_NUMBER.replace(/^\+/, ''),
+          'NCUT Abrasives Admin Notification',
+          body,
+          dashboardUrl.toString(),
+        );
+        await Message.updateOne(
+          { _id: claimed._id, adminNotificationStatus: 'SENDING' },
+          {
+            $set: {
+              adminNotificationStatus: 'ACCEPTED',
+              adminNotificationMessageId: whatsappMessageId,
+            },
+          },
+        );
+      } catch (error) {
+        await Message.updateOne(
+          { _id: claimed._id, adminNotificationStatus: 'SENDING' },
+          { $set: { adminNotificationStatus: 'FAILED' } },
+        );
+        throw error;
+      }
+    }
   }
 
   private async sendWelcome(customerId: Types.ObjectId, conversationId: Types.ObjectId, to: string): Promise<void> {
@@ -1101,7 +1200,7 @@ export class AutomationService {
       );
     }
     if (!lead) throw new Error('Unable to create or locate the customer lead');
-    if (lead.notificationStatus !== 'SENT') {
+    if (env.SALES_NOTIFICATION_PROVIDER !== 'whatsapp' && lead.notificationStatus !== 'SENT') {
       const notifyBody = JSON.stringify({
         event: 'lead.created',
         leadId: lead.id,
@@ -1124,6 +1223,22 @@ export class AutomationService {
         logger.info({ leadId: lead.id }, 'Sales lead created');
       }
       await Lead.updateOne({ _id: lead._id }, { $set: { notificationStatus: 'SENT', notificationSentAt: new Date() } });
+    } else if (env.SALES_NOTIFICATION_PROVIDER === 'whatsapp') {
+      const inboundNotification = await Message.findOne({ whatsappMessageId: inboundMessageId })
+        .select('adminNotificationStatus adminNotificationMessageId')
+        .lean();
+      if (inboundNotification?.adminNotificationStatus === 'ACCEPTED' && inboundNotification.adminNotificationMessageId) {
+        await Lead.updateOne(
+          { _id: lead._id },
+          {
+            $set: {
+              notificationStatus: 'ACCEPTED',
+              notificationSentAt: new Date(),
+              notificationMessageId: inboundNotification.adminNotificationMessageId,
+            },
+          },
+        );
+      }
     }
     const body = 'Thank you. A member of our sales team will be in touch with you.\n\nIs there anything else you\'d like me to help you with?';
     await this.sendTracked(customerId, conversationId, 'INTERACTIVE', {

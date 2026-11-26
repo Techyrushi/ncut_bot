@@ -5,6 +5,7 @@ import { recordSystemActivity } from '../logs/activity-log';
 import { WebhookEvent } from '../../database/models/webhook-event.model';
 import { Message } from '../../database/models/message.model';
 import { BulkCampaignRecipient } from '../../database/models/bulk-campaign.model';
+import { Lead } from '../../database/models/lead.model';
 import { automationService } from '../automation/automation.service';
 import { parseWhatsAppTimestamp } from '../whatsapp/service-window';
 
@@ -103,7 +104,43 @@ async function processStatus(payload: Record<string, unknown>): Promise<void> {
     )) ?? (await Message.findOne({ whatsappMessageId: messageId }));
   if (!message) {
     const recipient = await BulkCampaignRecipient.findOne({ whatsappMessageId: messageId });
-    if (!recipient) throw new Error(`Status update for message ${messageId} arrived before its local message record`);
+    if (!recipient) {
+      const messageDeliveryStatusGuard =
+        status === 'sent'
+          ? { adminNotificationDeliveryStatus: { $nin: ['DELIVERED', 'READ', 'FAILED'] } }
+          : status === 'delivered'
+            ? { adminNotificationDeliveryStatus: { $ne: 'READ' } }
+            : status === 'failed'
+              ? { adminNotificationDeliveryStatus: { $nin: ['DELIVERED', 'READ'] } }
+              : {};
+      const notifiedMessage = await Message.findOneAndUpdate(
+        { adminNotificationMessageId: messageId, ...messageDeliveryStatusGuard },
+        { $set: { adminNotificationDeliveryStatus: status.toUpperCase() } },
+        { new: true },
+      );
+      if (notifiedMessage) {
+        await Lead.updateOne(
+          { notificationMessageId: messageId },
+          { $set: { notificationDeliveryStatus: status.toUpperCase() } },
+        );
+        return;
+      }
+      const deliveryStatusGuard =
+        status === 'sent'
+          ? { notificationDeliveryStatus: { $nin: ['DELIVERED', 'READ', 'FAILED'] } }
+          : status === 'delivered'
+            ? { notificationDeliveryStatus: { $ne: 'READ' } }
+            : status === 'failed'
+              ? { notificationDeliveryStatus: { $nin: ['DELIVERED', 'READ'] } }
+              : {};
+      const lead = await Lead.findOneAndUpdate(
+        { notificationMessageId: messageId, ...deliveryStatusGuard },
+        { $set: { notificationDeliveryStatus: status.toUpperCase() } },
+        { new: true },
+      );
+      if (lead) return;
+      throw new Error(`Status update for message ${messageId} arrived before its local message record`);
+    }
     const recipientUpdate: Record<string, unknown> = { status: status.toUpperCase() };
     const receivedAt =
       typeof payload.timestamp === 'string' || typeof payload.timestamp === 'number'
