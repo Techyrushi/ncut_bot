@@ -8,25 +8,27 @@ async function seedEnquiryTemplate(): Promise<void> {
 
   const imageUrl = new URL('/PUNE TEMPLATE.png', env.FRONTEND_URL).toString();
   const result = await MessageTemplate.updateOne(
-    { name: 'ncut_product_enquiry_thank_you', languageCode: 'en' },
+    { name: 'enquiry_thank_you_template', languageCode: 'en' },
     {
       $setOnInsert: {
-        name: 'ncut_product_enquiry_thank_you',
+        name: 'enquiry_thank_you_template',
         languageCode: 'en',
         metaStatus: 'PENDING',
       },
       $set: {
-        category: 'UTILITY',
-        directSend: true,
+        metaTemplateId: '1718800239602030',
+        category: 'MARKETING',
+        directSend: false,
         components: [
           { type: 'HEADER', format: 'IMAGE' },
           {
             type: 'BODY',
-            text: 'Thank you for your interest in N-CUT Abrasives! Please contact our team for pricing or product enquiries.',
+            text: 'Thank you for your interest in N-CUT Abrasives! Please contact our team for pricing or product inquiries.',
           },
+          { type: 'FOOTER', text: 'N CUT Abrasives LLP' },
           {
             type: 'BUTTONS',
-            buttons: [{ type: 'QUICK_REPLY', id: 'connect_sales', text: 'Contact Sales' }],
+            buttons: [{ type: 'PHONE_NUMBER', text: 'Call phone number', phone_number: '+919890180821' }],
           },
         ],
         defaultSendComponents: [
@@ -39,10 +41,30 @@ async function seedEnquiryTemplate(): Promise<void> {
     },
     { upsert: true, runValidators: true, setDefaultsOnInsert: true },
   );
+  const removedOld = await MessageTemplate.deleteOne({
+    name: 'ncut_product_enquiry_thank_you',
+    languageCode: 'en',
+    directSend: true,
+  });
+  const template = await MessageTemplate.findOne({
+    name: 'enquiry_thank_you_template',
+    languageCode: 'en',
+  })
+    .select('metaStatus')
+    .lean();
+  if (!template) {
+    throw new Error('The enquiry_thank_you_template record was not found after syncing.');
+  }
 
   logger.info(
-    { inserted: result.upsertedCount, name: 'ncut_product_enquiry_thank_you', directSend: true },
-    'N-CUT product enquiry Direct Send entry prepared',
+    {
+      inserted: result.upsertedCount,
+      removedOld: removedOld.deletedCount,
+      name: 'enquiry_thank_you_template',
+      metaTemplateId: '1718800239602030',
+      metaStatus: template.metaStatus,
+    },
+    'N-CUT enquiry template registry updated',
   );
 }
 

@@ -960,7 +960,10 @@ export function ConversationsPage() {
     enabled: Boolean(selectedId),
     queryFn: async () =>
       (await api.get<ApiResponse<BasicRecord[]>>('/templates')).data.data.filter(
-        (template) => template.metaStatus === 'APPROVED' || template.directSend === true,
+        (template) =>
+          template.metaStatus === 'APPROVED' ||
+          template.metaStatus === 'PENDING' ||
+          template.directSend === true,
       ),
   });
   const startConversation = useMutation({
@@ -985,6 +988,8 @@ export function ConversationsPage() {
     lastInboundMessageAt <= clockNow &&
     clockNow < serviceWindowExpiresAt;
   const selectedTemplate = approvedTemplates.data?.find((template) => template._id === templateId);
+  const selectedTemplateCanSend =
+    selectedTemplate?.metaStatus === 'APPROVED' || selectedTemplate?.directSend === true;
   const templateFields = getTemplateFields(selectedTemplate);
   useEffect(() => {
     const timer = window.setInterval(() => setClockNow(Date.now()), 1000);
@@ -1524,6 +1529,7 @@ export function ConversationsPage() {
                         <option key={template._id} value={template._id}>
                           {String(template.name)} · {String(template.languageCode)}
                           {template.directSend ? ' · Direct Send' : ''}
+                          {template.metaStatus === 'PENDING' && !template.directSend ? ' · Pending approval' : ''}
                         </option>
                       ))}
                     </select>
@@ -1545,6 +1551,11 @@ export function ConversationsPage() {
                   {templateId && templateFields.length === 0 && (
                     <span className="small muted">This template does not require any parameters.</span>
                   )}
+                  {selectedTemplate?.metaStatus === 'PENDING' && (
+                    <span className="small muted" role="status">
+                      This template is awaiting Meta approval and cannot be sent yet.
+                    </span>
+                  )}
                   {approvedTemplates.isError && (
                     <div className="alert error">
                       {approvedTemplates.error instanceof Error
@@ -1564,6 +1575,7 @@ export function ConversationsPage() {
                       disabled={
                         sendTemplate.isPending ||
                         !templateId ||
+                        !selectedTemplateCanSend ||
                         !approvedTemplates.data?.length ||
                         templateFields.some((field) => !(templateParameters[field.id] ?? field.defaultValue).trim())
                       }

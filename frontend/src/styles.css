@@ -3710,16 +3710,25 @@ td {
   box-shadow: 0 0 0 1px #df485566;
 }
 .lead-history-button {
-  display: inline-flex;
+  display: flex;
+  width: 100%;
+  min-width: 154px;
   align-items: center;
-  gap: 9px;
-  min-height: 38px;
-  padding: 7px 10px;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 40px;
+  padding: 7px 9px;
   border: 1px solid #d8e1c4;
   border-radius: 8px;
   background: #f7faef;
   color: #45621d;
-  white-space: nowrap;
+  white-space: normal;
+  line-height: 1.25;
+  text-align: left;
+}
+.leads-data-table td:last-child {
+  min-width: 174px;
 }
 .lead-history-button:hover:not(:disabled),
 .lead-assign-button:hover:not(:disabled) {
@@ -3735,6 +3744,10 @@ td {
   outline-offset: 2px;
 }
 .lead-history-count {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  white-space: nowrap;
   padding: 2px 6px;
   border: 1px solid #dce5ca;
   border-radius: 999px;
@@ -3770,8 +3783,13 @@ td {
   .campaign-history-pagination .secondary-button {
     flex: 1;
   }
+  .leads-data-table td:last-child {
+    min-width: 164px;
+  }
   .lead-history-button {
-    white-space: normal;
+    min-width: 148px;
+    justify-content: center;
+    text-align: center;
   }
 }
 .logs-activity-heading {
