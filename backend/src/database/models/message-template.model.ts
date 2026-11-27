@@ -6,6 +6,7 @@ const messageTemplateSchema = new Schema(
     metaTemplateId: { type: String, trim: true },
     languageCode: { type: String, required: true, trim: true },
     category: { type: String, enum: ['MARKETING', 'UTILITY', 'AUTHENTICATION'], required: true },
+    directSend: { type: Boolean, default: false },
     metaStatus: { type: String, enum: ['PENDING', 'APPROVED', 'REJECTED', 'PAUSED'], default: 'PENDING', index: true },
     components: { type: [Schema.Types.Mixed], default: [] },
     defaultSendComponents: { type: [Schema.Types.Mixed], default: [] },

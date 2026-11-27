@@ -316,23 +316,25 @@ export function TemplatesPage() {
                   <td>{String(template.languageCode)}</td>
                   <td>{String(template.category)}</td>
                   <td>
-                    <span className={`status-chip ${template.metaStatus === 'APPROVED' ? 'on' : 'off'}`}>
-                      {String(template.metaStatus)}
+                    <span className={`status-chip ${template.directSend || template.metaStatus === 'APPROVED' ? 'on' : 'off'}`}>
+                      {template.directSend ? 'DIRECT SEND' : String(template.metaStatus)}
                     </span>
                   </td>
                   <td>
                     {user?.role === 'ADMIN' ? (
                       <div className="template-admin-actions">
-                        <select
-                          aria-label={`Status for ${String(template.name)}`}
-                          value={String(template.metaStatus)}
-                          onChange={(e) => update.mutate({ id: template._id, metaStatus: e.target.value })}
-                        >
-                          <option>PENDING</option>
-                          <option>APPROVED</option>
-                          <option>REJECTED</option>
-                          <option>PAUSED</option>
-                        </select>
+                        {!template.directSend && (
+                          <select
+                            aria-label={`Status for ${String(template.name)}`}
+                            value={String(template.metaStatus)}
+                            onChange={(e) => update.mutate({ id: template._id, metaStatus: e.target.value })}
+                          >
+                            <option>PENDING</option>
+                            <option>APPROVED</option>
+                            <option>REJECTED</option>
+                            <option>PAUSED</option>
+                          </select>
+                        )}
                         <button
                           type="button"
                           className="text-button"
@@ -901,6 +903,7 @@ export function ConversationsPage() {
   const [reply, setReply] = useState('');
   const [templateId, setTemplateId] = useState('');
   const [templateParameters, setTemplateParameters] = useState<Record<string, string>>({});
+  const [showTemplateSender, setShowTemplateSender] = useState(false);
   const [clockNow, setClockNow] = useState(Date.now());
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [attachment, setAttachment] = useState<File>();
@@ -934,6 +937,7 @@ export function ConversationsPage() {
     setInteractiveMode(false);
     setInteractiveBody('');
     setInteractiveButtonTitles('');
+    setShowTemplateSender(false);
   }, [selectedId]);
 
   const conversations = useQuery({
@@ -956,7 +960,7 @@ export function ConversationsPage() {
     enabled: Boolean(selectedId),
     queryFn: async () =>
       (await api.get<ApiResponse<BasicRecord[]>>('/templates')).data.data.filter(
-        (template) => template.metaStatus === 'APPROVED',
+        (template) => template.metaStatus === 'APPROVED' || template.directSend === true,
       ),
   });
   const startConversation = useMutation({
@@ -1091,6 +1095,7 @@ export function ConversationsPage() {
     onSuccess: async () => {
       setTemplateId('');
       setTemplateParameters({});
+      setShowTemplateSender(false);
       await Promise.all([
         client.invalidateQueries({ queryKey: ['conversation-messages', selectedId] }),
         client.invalidateQueries({ queryKey: ['conversations'] }),
@@ -1314,7 +1319,14 @@ export function ConversationsPage() {
                     <small>
                       {outbound ? 'You' : display(selected?.customerId)} · {formatDate(message.timestamp)}
                       {outbound && (
-                        <span className={`message-receipt ${String(message.status).toLowerCase()}`}>
+                        <span
+                          className={`message-receipt ${String(message.status).toLowerCase()}`}
+                          title={
+                            message.status === 'SENT'
+                              ? 'WhatsApp accepted the message. Delivery confirmation is pending.'
+                              : undefined
+                          }
+                        >
                           {receiptLabel(message.status)}
                         </span>
                       )}
@@ -1327,7 +1339,7 @@ export function ConversationsPage() {
           )}
           {selected && (
             <section className="message-composer">
-              {serviceWindowOpen ? (
+              {serviceWindowOpen && (
                 <form onSubmit={submitReply}>
                   <label className="interactive-toggle">
                     <input
@@ -1459,29 +1471,48 @@ export function ConversationsPage() {
                     </>
                   )}
                 </form>
-              ) : (
+              )}
+              {!serviceWindowOpen && (
+                <div className="service-window-notice" role="status">
+                  <span className="service-window-notice-icon" aria-hidden="true">
+                    i
+                  </span>
+                  <div>
+                    <strong>{lastInboundMessageAt ? 'Continue with a template' : 'Start with a template'}</strong>
+                    <p>
+                      {lastInboundMessageAt
+                        ? 'The 24-hour reply window has ended. Send a template to continue; customer opt-in is required.'
+                        : 'A template can start this chat; customer opt-in is required.'}
+                    </p>
+                  </div>
+                </div>
+              )}
+              {serviceWindowOpen && (
+                <button
+                  type="button"
+                  className="template-sender-toggle"
+                  aria-expanded={showTemplateSender}
+                  aria-controls="template-sender-form"
+                  onClick={() => setShowTemplateSender((shown) => !shown)}
+                >
+                  <span>Send an approved template</span>
+                  <span className="template-sender-toggle-hint">Optional</span>
+                  <span className="template-sender-toggle-icon" aria-hidden="true">
+                    {showTemplateSender ? '−' : '+'}
+                  </span>
+                </button>
+              )}
+              {(!serviceWindowOpen || showTemplateSender) && (
                 <form
+                  id="template-sender-form"
                   className="template-reply"
                   onSubmit={(event) => {
                     event.preventDefault();
                     sendTemplate.mutate();
                   }}
                 >
-                  <div className="service-window-notice" role="status">
-                    <span className="service-window-notice-icon" aria-hidden="true">
-                      i
-                    </span>
-                    <div>
-                      <strong>{lastInboundMessageAt ? 'Continue with a template' : 'Start with a template'}</strong>
-                      <p>
-                        {lastInboundMessageAt
-                          ? 'The 24-hour reply period has ended. Choose an approved template to continue; the contact must have recorded opt-in.'
-                          : 'This contact has not messaged you yet. An approved template can start the conversation. Regular replies are available after they respond.'}
-                      </p>
-                    </div>
-                  </div>
                   <label>
-                    Approved template
+                    Approved template or Direct Send
                     <select
                       required
                       value={templateId}
@@ -1492,6 +1523,7 @@ export function ConversationsPage() {
                       {(approvedTemplates.data ?? []).map((template) => (
                         <option key={template._id} value={template._id}>
                           {String(template.name)} · {String(template.languageCode)}
+                          {template.directSend ? ' · Direct Send' : ''}
                         </option>
                       ))}
                     </select>
@@ -1511,7 +1543,7 @@ export function ConversationsPage() {
                     </label>
                   ))}
                   {templateId && templateFields.length === 0 && (
-                    <span className="small muted">This approved template does not require any parameters.</span>
+                    <span className="small muted">This template does not require any parameters.</span>
                   )}
                   {approvedTemplates.isError && (
                     <div className="alert error">
@@ -1526,7 +1558,7 @@ export function ConversationsPage() {
                     </div>
                   )}
                   <div className="composer-footer">
-                    <span className="small muted">Meta delivery status appears in the conversation history.</span>
+                    <span className="small muted">Delivery status updates automatically.</span>
                     <button
                       className="primary-button"
                       disabled={
@@ -1920,6 +1952,10 @@ function messageText(value: unknown): string {
     const reply = record.interactive as Record<string, unknown>;
     return String(reply.title ?? reply.id ?? 'Interactive response');
   }
+  if (record.button && typeof record.button === 'object') {
+    const button = record.button as Record<string, unknown>;
+    return String(button.text ?? button.payload ?? 'Button response');
+  }
   const body = typeof record.text === 'string' ? record.text : '';
   if (Array.isArray(record.products)) {
     const names = record.products
@@ -1984,7 +2020,7 @@ function receiptLabel(value: unknown): string {
     case 'QUEUED':
       return 'Sending…';
     case 'SENT':
-      return 'Sent ✓';
+      return 'Sent · awaiting delivery';
     case 'DELIVERED':
       return 'Delivered ✓✓';
     case 'READ':

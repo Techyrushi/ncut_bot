@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "eslint src tests --ext .ts",
     "test": "jest --runInBand",
-    "seed:catalogue": "tsx src/scripts/seed-catalogue.ts"
+    "seed:catalogue": "tsx src/scripts/seed-catalogue.ts",
+    "seed:enquiry-template": "tsx src/scripts/seed-enquiry-template.ts"
   },
   "dependencies": {
     "bcryptjs": "2.4.3",

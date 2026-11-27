@@ -13,6 +13,10 @@ import { isServiceWindowOpen } from './service-window';
 const sendBase = z.object({ customerId: z.string().regex(/^[a-f\d]{24}$/i) });
 export const whatsappRouter = Router();
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 async function getMessagingContext(customerId: string) {
   const [customer, conversation] = await Promise.all([
     Customer.findById(customerId),
@@ -72,7 +76,10 @@ whatsappRouter.post(
       Conversation.findOne({ customerId: input.customerId, status: { $in: ['OPEN', 'HUMAN_HANDOVER'] } }).sort({
         updatedAt: -1,
       }),
-      MessageTemplate.findOne({ _id: input.templateId, metaStatus: 'APPROVED' }),
+      MessageTemplate.findOne({
+        _id: input.templateId,
+        $or: [{ metaStatus: 'APPROVED' }, { directSend: true }],
+      }),
     ]);
     if (!customer || !conversation || !template)
       throw new ApiError(404, 'Customer conversation or approved template not found', 'NOT_FOUND');
@@ -82,19 +89,62 @@ whatsappRouter.post(
         'Customer opt-in is required for business-initiated messages',
         'CUSTOMER_OPT_IN_REQUIRED',
       );
-    const whatsappMessageId = await whatsappService.sendTemplate(
-      customer.phoneNumber ?? customer.whatsappId,
-      template.name,
-      template.languageCode,
-      input.components ?? template.defaultSendComponents,
-    );
+    let whatsappMessageId: string;
+    let content: Record<string, unknown> = { templateName: template.name, languageCode: template.languageCode };
+    if (template.directSend) {
+      if (template.category !== 'UTILITY')
+        throw new ApiError(400, 'Direct Send templates must use the UTILITY category', 'INVALID_DIRECT_SEND_TEMPLATE');
+      const metadata = template.components.filter(isRecord);
+      const bodyComponent = metadata.find((component) => String(component.type).toUpperCase() === 'BODY');
+      const body = typeof bodyComponent?.text === 'string' ? bodyComponent.text : '';
+      const buttonsComponent = metadata.find((component) => String(component.type).toUpperCase() === 'BUTTONS');
+      const buttons = Array.isArray(buttonsComponent?.buttons) ? buttonsComponent.buttons.filter(isRecord) : [];
+      const button = buttons.find((item) => String(item.type).toUpperCase() === 'QUICK_REPLY');
+      const buttonId = typeof button?.id === 'string' ? button.id : '';
+      const buttonTitle = typeof button?.text === 'string' ? button.text : '';
+      const sendComponents = (input.components ?? template.defaultSendComponents).filter(isRecord);
+      const header = sendComponents.find((component) => String(component.type).toLowerCase() === 'header');
+      const parameters = Array.isArray(header?.parameters) ? header.parameters : [];
+      const imageParameter = isRecord(parameters[0]) ? parameters[0] : undefined;
+      const image = isRecord(imageParameter?.image) ? imageParameter.image : undefined;
+      const imageUrl = typeof image?.link === 'string' ? image.link : '';
+      if (!body || !imageUrl || !buttonId || !buttonTitle)
+        throw new ApiError(
+          400,
+          'Direct Send template requires body text, an image header, and a quick-reply button',
+          'INVALID_DIRECT_SEND_TEMPLATE',
+        );
+      whatsappMessageId = await whatsappService.sendDirectUtilityImageReply(
+        customer.phoneNumber ?? customer.whatsappId,
+        template.name,
+        body,
+        imageUrl,
+        buttonId,
+        buttonTitle,
+      );
+      content = {
+        ...content,
+        directSend: true,
+        category: 'UTILITY',
+        caption: body,
+        imageUrl,
+        buttons: [{ id: buttonId, title: buttonTitle }],
+      };
+    } else {
+      whatsappMessageId = await whatsappService.sendTemplate(
+        customer.phoneNumber ?? customer.whatsappId,
+        template.name,
+        template.languageCode,
+        input.components ?? template.defaultSendComponents,
+      );
+    }
     const message = await Message.create({
       customerId: customer._id,
       conversationId: conversation._id,
       whatsappMessageId,
       direction: 'OUTBOUND',
       messageType: 'TEMPLATE',
-      content: { templateName: template.name, languageCode: template.languageCode },
+      content,
       status: 'SENT',
       timestamp: new Date(),
     });

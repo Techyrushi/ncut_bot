@@ -962,6 +962,27 @@ describe('catalogue automation', () => {
     expect(await Message.countDocuments({ direction: 'OUTBOUND', messageType: 'INTERACTIVE' })).toBe(2);
   });
 
+  it('routes Direct Send Contact Sales quick replies to sales handover', async () => {
+    fakeMetaSend();
+    const customer = await Customer.create({ whatsappId: '15550003337', phoneNumber: '15550003337' });
+    const conversation = await Conversation.create({
+      customerId: customer._id,
+      status: 'OPEN',
+      currentStep: 'WELCOME_SENT',
+    });
+
+    await automationService.processIncoming({
+      id: 'msg-direct-send-contact-sales',
+      from: customer.whatsappId,
+      timestamp: String(Math.floor(Date.now() / 1000)),
+      type: 'button',
+      button: { payload: 'connect_sales', text: 'Contact Sales' },
+    });
+
+    expect((await Conversation.findById(conversation._id))?.status).toBe('HUMAN_HANDOVER');
+    expect(await Lead.countDocuments({ customerId: customer._id })).toBe(1);
+  });
+
   it('reuses one customer lead when a returning customer hands over a later conversation', async () => {
     fakeMetaSend();
     const customer = await Customer.create({ whatsappId: '15550003335', phoneNumber: '15550003335' });

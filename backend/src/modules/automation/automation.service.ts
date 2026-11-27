@@ -428,6 +428,7 @@ export class AutomationService {
       connect_sales: 'connect_sales',
       connect_with_team: 'connect_sales',
       connect_with_our_team: 'connect_sales',
+      contact_sales: 'connect_sales',
     };
     const candidates = [message.button.payload, message.button.text].filter(
       (value): value is string => Boolean(value?.trim()),

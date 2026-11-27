@@ -1389,6 +1389,90 @@ it('lets admins edit approved template defaults and sends the saved defaults whe
   });
 });
 
+it('sends Direct Send utility templates with a named image reply button from conversations', async () => {
+  const admin = await User.create({
+    email: 'direct-send-admin@example.com',
+    name: 'Direct Send Admin',
+    passwordHash: await hash('long-test-password', 4),
+    role: 'ADMIN',
+  });
+  const token = jwt.sign({ role: admin.role, ver: admin.authVersion ?? 0 }, env.JWT_SECRET, {
+    subject: admin.id,
+    jwtid: randomUUID(),
+    expiresIn: '1h',
+  });
+  const customer = await Customer.create({
+    whatsappId: '15551110002',
+    phoneNumber: '15551110002',
+    optInStatus: 'OPTED_IN',
+  });
+  await Conversation.create({
+    customerId: customer._id,
+    status: 'OPEN',
+    lastInboundMessageAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+  });
+  const imageUrl = 'https://ncut-app.ssdit.in/PUNE%20TEMPLATE.png';
+  const body =
+    'Thank you for your interest in N-CUT Abrasives! Please contact our team for pricing or product enquiries.';
+  const template = await MessageTemplate.create({
+    name: 'ncut_product_enquiry_thank_you',
+    languageCode: 'en',
+    category: 'UTILITY',
+    metaStatus: 'PENDING',
+    directSend: true,
+    components: [
+      { type: 'HEADER', format: 'IMAGE' },
+      { type: 'BODY', text: body },
+      {
+        type: 'BUTTONS',
+        buttons: [{ type: 'QUICK_REPLY', id: 'connect_sales', text: 'Contact Sales' }],
+      },
+    ],
+    defaultSendComponents: [
+      { type: 'header', parameters: [{ type: 'image', image: { link: imageUrl } }] },
+    ],
+  });
+  const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue(
+    new Response(JSON.stringify({ messages: [{ id: 'wamid.ncut-direct-send' }] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  );
+
+  const sent = await request(app)
+    .post('/api/v1/whatsapp/send-template')
+    .set('authorization', `Bearer ${token}`)
+    .send({ customerId: customer.id, templateId: template.id });
+
+  expect(sent.status).toBe(201);
+  expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toMatchObject({
+    type: 'interactive',
+    category: 'utility',
+    direct_send_config: { template_name: 'ncut_product_enquiry_thank_you' },
+    interactive: {
+      type: 'button',
+      header: { type: 'image', image: { link: imageUrl } },
+      body: { text: body },
+      action: {
+        buttons: [{ type: 'reply', reply: { id: 'connect_sales', title: 'Contact Sales' } }],
+      },
+    },
+  });
+  const message = await Message.findOne({ whatsappMessageId: 'wamid.ncut-direct-send' }).lean();
+  expect(message).toMatchObject({
+    messageType: 'TEMPLATE',
+    content: {
+      templateName: 'ncut_product_enquiry_thank_you',
+      languageCode: 'en',
+      directSend: true,
+      category: 'UTILITY',
+      caption: body,
+      imageUrl,
+      buttons: [{ id: 'connect_sales', title: 'Contact Sales' }],
+    },
+  });
+});
+
 it('records verified opt-in for an unknown campaign recipient and queues the approved template', async () => {
   const admin = await User.create({
     email: 'admin@example.com',

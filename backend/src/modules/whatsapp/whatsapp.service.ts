@@ -295,6 +295,49 @@ export class WhatsAppService {
     });
   }
 
+  sendDirectUtilityImageReply(
+    to: string,
+    name: string,
+    body: string,
+    imageUrl: string,
+    buttonId: string,
+    buttonTitle: string,
+  ): Promise<string> {
+    let image: URL;
+    try {
+      image = new URL(imageUrl);
+    } catch {
+      throw new ApiError(400, 'Direct Send image URL must be a valid HTTPS URL', 'INVALID_DIRECT_SEND_MESSAGE');
+    }
+    if (
+      !/^[a-z0-9_]{1,512}$/.test(name) ||
+      image.protocol !== 'https:' ||
+      !body.trim() ||
+      body.length > 1024 ||
+      !buttonId.trim() ||
+      buttonId.length > 256 ||
+      !buttonTitle.trim() ||
+      buttonTitle.length > 20
+    ) {
+      throw new ApiError(400, 'Direct Send utility template content is invalid', 'INVALID_DIRECT_SEND_MESSAGE');
+    }
+    return this.send(
+      to,
+      {
+        type: 'interactive',
+        category: 'utility',
+        direct_send_config: { template_name: name },
+        interactive: {
+          type: 'button',
+          header: { type: 'image', image: { link: image.toString() } },
+          body: { text: body },
+          action: { buttons: [{ type: 'reply', reply: { id: buttonId, title: buttonTitle } }] },
+        },
+      },
+      true,
+    );
+  }
+
   sendDirectNotification(to: string, title: string, body: string, url: string): Promise<string> {
     let destination: URL;
     try {

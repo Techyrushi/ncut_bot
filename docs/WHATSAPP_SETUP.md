@@ -12,6 +12,8 @@ Use Meta's current [Cloud API message reference](https://developers.facebook.com
 8. Configure callback URL and subscribe to the `messages` field as described in `WEBHOOK_SETUP.md`.
 9. Create and submit message templates in WhatsApp Manager. Add only templates showing approved status to this application's template registry.
 
+To prepare N-CUT's enquiry follow-up in the app, run `npm --prefix backend run seed:enquiry-template`. This idempotently registers `ncut_product_enquiry_thank_you` as a Direct Send UTILITY message with the PUNE image header, supplied enquiry text, and a Contact Sales quick-reply button. It appears in conversation dropdowns without a manual template-approval status. Selecting it sends the named message through Direct Send; Meta generates or reuses the named template as part of the send. Selecting Contact Sales starts the existing sales handover flow. Direct Send utility eligibility is controlled by Meta and unavailable accounts receive an API error. The first send is an outbound message and still requires recorded customer opt-in.
+
 Never put an access token in frontend build variables, source control, support logs, or screenshots. Rotate tokens and app secrets if exposed. Use a long-lived system-user token process supported by Meta rather than a temporary onboarding token.
 
 The repository-root `.env` is loaded by the backend. Set `WHATSAPP_PHONE_NUMBER_ID` to the numeric sender ID (not the displayed test phone number), `WHATSAPP_BUSINESS_ACCOUNT_ID` to the WABA ID, and `META_GRAPH_API_VERSION` to the selected Graph version. Set the browser-facing API base URL in `frontend/.env.local` as `VITE_API_URL`; keep that file limited to public configuration and never put secrets in `VITE_` variables.

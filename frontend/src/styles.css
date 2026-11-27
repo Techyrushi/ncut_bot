@@ -3895,3 +3895,108 @@ td {
     grid-column: 1 / -1;
   }
 }
+
+.message-composer {
+  gap: 8px;
+}
+.template-sender-toggle {
+  display: flex;
+  width: 100%;
+  min-height: 42px;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 11px;
+  border: 1px solid #e6e9ef;
+  border-radius: 8px;
+  background: #fff;
+  color: #354159;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 700;
+}
+.template-sender-toggle:hover {
+  border-color: #cbd9a8;
+  background: #fbfcf8;
+}
+.template-sender-toggle-hint {
+  color: #8792a4;
+  font-size: 11px;
+  font-weight: 500;
+}
+.template-sender-toggle-icon {
+  margin-left: auto;
+  color: #667188;
+  font-size: 18px;
+  line-height: 1;
+}
+.template-reply {
+  gap: 8px;
+  padding-top: 9px;
+  border-top: 1px solid #edf0f4;
+}
+.template-reply label {
+  gap: 5px;
+}
+.template-reply select,
+.template-reply input {
+  min-height: 40px;
+}
+.template-reply .composer-footer {
+  justify-content: space-between;
+  gap: 10px;
+}
+.template-reply .composer-footer .primary-button {
+  min-height: 40px;
+  flex: 0 0 auto;
+}
+.service-window-notice {
+  padding: 9px 11px;
+}
+.service-window-notice-icon {
+  flex-basis: 18px;
+  width: 18px;
+  height: 18px;
+}
+.message-receipt.sent {
+  color: #8792a4;
+}
+
+@media (max-width: 720px) {
+  .message-thread {
+    height: calc(100dvh - 150px);
+    min-height: 320px;
+    padding: 10px;
+    gap: 7px;
+  }
+  .message-history {
+    min-height: 0;
+    padding: 9px 6px;
+    gap: 8px;
+  }
+  .message-composer .composer-footer {
+    align-items: flex-start;
+  }
+  .template-reply .composer-footer {
+    align-items: stretch;
+    flex-direction: row;
+  }
+  .template-reply .composer-footer .small {
+    align-self: center;
+  }
+}
+
+@media (max-width: 380px) {
+  .template-sender-toggle {
+    min-height: 40px;
+    padding-inline: 8px;
+    font-size: 12px;
+  }
+  .template-reply .composer-footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .template-reply .composer-footer .primary-button {
+    width: 100%;
+    justify-content: center;
+  }
+}
